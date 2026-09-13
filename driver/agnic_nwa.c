@@ -701,29 +701,12 @@ agnic_nwa_bringup(struct agnic_softc *sc)
 	}
 
 	/*
-	 * P4c PROBE (one-shot): the NPU switch manager (UMSD_NPU/NetAgent) IS
-	 * running and answers STATE(0)-GET via umsd_port_link_status_get -> Port
-	 * Status bit 11. But its sw_port() decode treats a tag-formatted port_id
-	 * (bit15 set, our 0x81pp) as "obsolete" and mis-resolves it, while a RAW
-	 * physical port number (0..10) resolves directly. STATE(0) with the tag
-	 * returned 0 for the cabled port1; try it with the RAW physnum too. If the
-	 * raw form returns link=1 for a cabled port (resp[2]), the fix is purely
-	 * driver-side: query link by physnum, not tag.
+	 * (The upstream one-shot STATE(0) probe by raw port number was removed:
+	 * on the XGS 126 NetAgent answers it with 'fail find SoC port N' for every
+	 * N > 4, because raw numbers address the NPU's own SoC ports eth0..eth4,
+	 * and it never produced a usable link reading. Carrier comes from
+	 * ALL_COMB_PORT_INFO in the link poll.)
 	 */
-	for (i = 0; i < sc->nwa_nports; i++) {
-		uint32_t rt[4], rp[4];
-		uint16_t tag = sc->nwa_ports[i].tag;
-		uint8_t pn = sc->nwa_ports[i].portnum;
-
-		bzero(rt, sizeof(rt));
-		bzero(rp, sizeof(rp));
-		(void)agnic_nwa_attr_get(sc, tag, 0 /*STATE*/, rt, nitems(rt));
-		(void)agnic_nwa_attr_get(sc, pn, 0 /*STATE*/, rp, nitems(rp));
-		device_printf(dev, "P4c PROBE Port%u STATE(0) via tag0x%04x="
-		    "%08x %08x %08x | via raw%u=%08x %08x %08x\n", pn, tag,
-		    rt[0], rt[1], rt[2], pn, rp[0], rp[1], rp[2]);
-	}
-
 	sc->nwa_ready = 1;
 	device_printf(dev, "[Phase 4a] NW_AGENT up; %d of %u port(s) manageable "
 	    "front-panel, admin-up -- check front-panel LEDs\n",
