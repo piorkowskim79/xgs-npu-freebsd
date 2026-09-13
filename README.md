@@ -34,7 +34,8 @@ NPU data plane (`dp_fwd`) to carry traffic on the 116, and that replacement is
 |---|---|---|
 | PCI endpoint `11ab:7080` present | **Measured** | GRUB `lspci` on the box, 2026-09-13 |
 | BAR sizes 1M / 16M / 16M | Unverified | needs `pciconf -lbv` under FreeBSD |
-| Driver builds on FreeBSD 15.1 | **Type-checked**, not built | `tools/syntax-check.sh` against `releng/15.1` headers |
+| Driver builds for FreeBSD 15.1 | **Cross-built and symbol-checked** (`build/if_agnic.ko`) | `tools/crossbuild-ko.sh` (unity build with clang, no FreeBSD host); every external symbol resolved against the 15.1-RELEASE GENERIC kernel (`tools/elfsyms.py`); not yet loaded on hardware |
+| Live test stick (FreeBSD 15.1 memstick + driver + stage script) | **Image built**, not booted yet | `tools/mkstick.sh`; see [docs/TESTBED.md](docs/TESTBED.md) |
 | Control plane (barmap, CTRL, mgmt echo) | Unverified | Measured upstream on XGS 116 only |
 | `mvmgmt0` link to the NPU, SSH into it | Unverified | Measured upstream on XGS 116 only |
 | NW_AGENT port discovery (gives the 126 port table) | Unverified | code targets stock firmware; Measured upstream on 116 |
@@ -105,6 +106,11 @@ Per-device counters and the TX-header experiments live under `dev.agnic.0`.
 | `opnsense/plugins/net/agnic/` | `os-agnic` plugin: depends on the kmod, loads it at boot | MIT |
 | `tools/probe.sh` | endpoint check (PCI id + BARs) from upstream | MIT |
 | `tools/syntax-check.sh` | clang type-check against a FreeBSD `sys/` tree | MIT |
+| `tools/crossbuild-ko.sh` | build `if_agnic.ko` on macOS/Linux with clang (unity build; a kmod is an ET_REL object, no linker needed) | MIT |
+| `tools/elfsyms.py` | check the module's imports against the GENERIC kernel's exported symbols | MIT |
+| `tools/ufs2tool.py`, `tools/fat16tool.py` | read (and same-length patch) UFS2 / read FAT16 inside a raw image, from any host | MIT |
+| `tools/mkstick.sh` | build the live test stick from the stock 15.1 memstick image: serial console + driver + stage script | MIT |
+| `build/` (git-ignored) | `if_agnic.ko`, the stick image, `SHA256SUMS` | — |
 | `docs/` | changes, test bed, test plan, OPNsense integration, XGS 126 facts | MIT |
 
 ## Relationship to upstream

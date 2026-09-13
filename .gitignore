@@ -20,3 +20,6 @@ opnsense/plugins/**/work/
 # editors / macOS
 .DS_Store
 *.swp
+
+# cross-built module and stick images (release artefacts, not source)
+build/

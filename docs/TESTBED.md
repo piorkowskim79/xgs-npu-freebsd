@@ -1,10 +1,63 @@
 # Test bed: the Sophos XGS 126 as a FreeBSD lab box
 
-Goal: a plain FreeBSD 15.1-RELEASE on the XGS 126 that can be reached over SSH, builds
-kernel modules itself, and leaves the Sophos installation untouched so the box can go
-back to being a Sophos appliance. OPNsense 26.7 is FreeBSD 15.1-RELEASE-p1 based, so a
-module that works on plain 15.1 is the right first target; packaging for OPNsense is a
-separate step ([OPNSENSE.md](OPNSENSE.md)).
+Two ways to get FreeBSD 15.1 onto the XGS 126 without touching its Sophos installation.
+The **live stick** (next section) needs no installation at all and is the first thing to
+run; the **installed lab box** (rest of this page) is for the SSH-driven development loop
+once the driver is worth iterating on. OPNsense 26.7 is FreeBSD 15.1-RELEASE-p1 based,
+so a module that works on plain 15.1 is the right first target; packaging for OPNsense
+is a separate step ([OPNSENSE.md](OPNSENSE.md)).
+
+## Live stick: boot, load the driver, collect logs, nothing installed
+
+`tools/mkstick.sh` turns the stock `FreeBSD-15.1-RELEASE-amd64-memstick.img` into a
+stick that boots the GENERIC 15.1 kernel read-only from USB with the serial console at
+115200 on both boot paths (legacy: `/boot/loader.conf` patched in place; UEFI: the same
+plus `EFI/FreeBSD/loader.env`), and carries on its FAT partition (`EFISYS`, MBR slice 1):
+
+| Path on the stick | What |
+|---|---|
+| `xgs/if_agnic.ko` | the driver, cross-built for exactly the kernel on the stick and symbol-checked against it |
+| `xgs/stage.sh` | runs one test-plan stage and writes the log to `xgs/logs/` |
+| `xgs/driver/`, `xgs/docs/` | sources and this documentation |
+| `xgs/README-STICK.txt` | the short version of this section |
+
+Write it (macOS; the stick is the 4 GB "Flash Disk", check `diskutil list` first):
+
+```sh
+diskutil unmountDisk /dev/diskN
+sudo dd if=build/xgs126-live-freebsd-15.1.img of=/dev/rdiskN bs=1m status=progress
+diskutil eject /dev/diskN
+```
+
+Boot it with the console logged to a file on the Mac, so every line the box prints is
+kept without any network:
+
+```sh
+screen -L -Logfile ~/xgs126-console.log /dev/cu.usbserial-XXXX 38400   # BIOS phase
+# Ctrl-A k when the FreeBSD loader appears, then:
+screen -L -Logfile ~/xgs126-console.log /dev/cu.usbserial-XXXX 115200
+```
+
+Stick in the front USB port, Delete for the BIOS, one-time boot override to the stick
+(UEFI or legacy entry, both work), FreeBSD loader menu, then in the installer menu choose
+**Shell**. Then:
+
+```sh
+mount -t msdosfs /dev/da0s1 /mnt
+sh /mnt/xgs/stage.sh info      # inventory: SMBIOS, PCI, BARs, UARTs; loads nothing
+sh /mnt/xgs/stage.sh 0         # attach, barmap, CTRL handshake, mvmgmt0; no rings
+kldunload if_agnic
+sh /mnt/xgs/stage.sh 1         # + mgmt rings, ECHO, capabilities
+```
+
+Then power-cycle the box (the NPU latches the rings once per NPU boot), boot the stick
+again, mount, and `sh /mnt/xgs/stage.sh 3` for the datapath and the port interfaces.
+`umount /mnt; shutdown -p now` when done. The console log on the Mac plus `xgs/logs/`
+on the stick are the deliverables; [TESTPLAN.md](TESTPLAN.md) says what each line means.
+
+macOS does not mount the stick's `EFISYS` slice (it refuses MBR type `0xEF`), so the
+console log is the primary channel; `sudo python3 tools/fat16tool.py ls /dev/rdiskN 512`
+reads the stick's FAT directly if needed. The stick never writes to the XGS.
 
 Facts about the box used below come from the project fact sheets (Sophos manuals, the
 GRUB `lspci` run on 2026-09-13); items marked *check* have not been confirmed on this unit.
