@@ -19,6 +19,7 @@ SYS=${FREEBSD_SYS:?set FREEBSD_SYS=/path/to/freebsd-src/sys}
 HERE=$(cd "$(dirname "$0")" && pwd)
 DRV=$HERE/../driver
 OUT=${1:-$HERE/../build}
+mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)		# absolute: we cd into the objdir below
 CC=${CC:-clang}
 TARGET=${TARGET:-x86_64-unknown-freebsd15.1}
 OBJ=$(mktemp -d "${TMPDIR:-/tmp}/agnic-xbuild.XXXXXX")
