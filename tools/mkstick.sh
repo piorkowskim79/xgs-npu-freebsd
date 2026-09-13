@@ -31,6 +31,17 @@ echo "ESP: start sector $ESP_START, $ESP_SECTORS sectors, $ESP_BYTES bytes"
 printf 'vfs.mountroot.timeout="10"\nconsole="comconsole"\ncomconsole_speed="115200"\n' > "$TMP/loader.conf"
 $UFS patch "$OUT" /boot/loader.conf "$TMP/loader.conf"
 
+# --- 1b. /etc/rc.local -> our auto-start (same-length patch; the memstick's original rc.local is
+#         the 1990-byte bsdinstall launcher, so our ~600-byte script fits, padded with newlines).
+#         It mounts the FAT payload and runs xgs/autostart.sh (WLAN + sshd), then a console shell.
+#         Set RC_LOCAL= to override; default is the repo copy. ---
+RC_LOCAL=${RC_LOCAL:-$HERE/../npu/stick/rc.local}
+if [ -f "$RC_LOCAL" ]; then
+	$UFS patch "$OUT" /etc/rc.local "$RC_LOCAL" && echo "rc.local -> auto-start ($(wc -c < "$RC_LOCAL") bytes)"
+else
+	echo "WARNING: $RC_LOCAL not found; stick will boot the stock installer, no auto-start"
+fi
+
 # --- 2. new ESP ---
 $UFS cat "$OUT" /boot/loader.efi > "$TMP/BOOTX64.EFI"
 # macOS newfs_msdos formats devices only: attach an empty file as a raw disk first
