@@ -76,6 +76,50 @@ n=$(grep -c '^CFLAGS+="-Werror "' "$MUSDK/configure.ac" || true)
 [ "$n" = 1 ] || die "expected exactly one -Werror line in configure.ac, found $n (MUSDK revision changed?)"
 sed -i 's/^CFLAGS+="-Werror "/# native gcc-14 build (xgs-npu-freebsd): CFLAGS+="-Werror "/' "$MUSDK/configure.ac"
 
+# ---- 2b. front-panel switch DSA device number (xgs-npu-freebsd, 126 adaptation) --------
+# The FROM_CPU DSA tag dp_fwd emits must target the 88E6193X's OWN device number, or the
+# switch silently drops every host->front frame (measured: dp_fwd counts pp2_tx, the wire
+# stays dark). The kit hardcodes DP_DSA_DEV=2, verified on the XGS 116 (its live frames carry
+# DSA byte0 0xc2 -> dev 2). The XGS 126's live frames carry byte0 0xc0 -> dev 0. So the 126
+# needs dev 0. Default 0 (this project's board); pass DSA_DEV=2 to build for a 116.
+# Applied AFTER the kit checkout so a re-run re-derives it; idempotent.
+DSA_DEV=${DSA_DEV:-0}
+TAG=$KIT/npu-firmware/src/tag_dsa.h
+cur=$(grep -oE '#define[[:space:]]+DP_DSA_DEV[[:space:]]+[0-9]+' "$TAG" | grep -oE '[0-9]+$')
+[ -n "$cur" ] || die "could not find DP_DSA_DEV in $TAG (kit revision changed?)"
+if [ "$cur" != "$DSA_DEV" ]; then
+	sed -i -E "s/(#define[[:space:]]+DP_DSA_DEV[[:space:]]+)[0-9]+/\1$DSA_DEV/" "$TAG"
+	say "DP_DSA_DEV $cur -> $DSA_DEV (switch device number in the FROM_CPU tag)"
+else
+	say "DP_DSA_DEV already $DSA_DEV"
+fi
+
+# ---- 2c. export dp_fwd host->front counters in the pport md (xgs-npu-freebsd) ----------
+# The mvmgmt0 management link is flaky after a host driver reload, which blocks reading
+# dp_fwd's /tmp log. Instead stamp the four host->front counters into the RX pport md's
+# reserved bytes (agnic_pport_md.reserved1, md offset 0x30 = 16 spare bytes); the FreeBSD
+# host reads them via `sysctl dev.agnic.0.npu_*` with no mvmgmt0 dependency. Applied after
+# the kit checkout so a re-run re-derives it; both sides are little-endian.
+FWD=$KIT/npu-firmware/forwarder/forwarder.c
+if grep -q 'xgs-npu-freebsd md counters' "$FWD"; then
+	say "forwarder.c md-counter patch already present"
+elif grep -q 'giu_len = folen;' "$FWD"; then
+	MDINS=$(mktemp "${TMPDIR:-/tmp}/mdins.XXXXXX")
+	cat > "$MDINS" <<'INS'
+		/* xgs-npu-freebsd md counters: export host->front counters in the pport md
+		 * reserved bytes so the FreeBSD host reads them via sysctl (no mvmgmt0). LE both sides. */
+		{ struct agnic_pport_md *dpmd = (struct agnic_pport_md *)(fo + PPORT_TAG_LEN);
+		  uint32_t *dpc = (uint32_t *)dpmd->reserved1;
+		  dpc[0] = (uint32_t)dp_giu_rx;   dpc[1] = (uint32_t)dp_pp2_tx;
+		  dpc[2] = (uint32_t)dp_h2t_drop; dpc[3] = (uint32_t)dp_egr_full_drop; }
+INS
+	sed -i "/giu_len = folen;/r $MDINS" "$FWD"
+	rm -f "$MDINS"
+	say "patched forwarder.c: export host->front counters in the pport md"
+else
+	die "forwarder.c anchor 'giu_len = folen;' not found (kit revision changed?)"
+fi
+
 # ---- 3. drop the forwarder into the pkt_echo slot (upstream build_fwd.sh, verbatim) ----
 say "installing forwarder.c + wire-contract headers into the MUSDK tree"
 PE=$MUSDK/apps/examples/giu/pkt_echo
@@ -122,6 +166,7 @@ for f in npu-run-dp_fwd.sh xgs-fetch-and-relay.sh; do [ -f "$HERE/$f" ] && cp "$
 	echo "configure:  --enable-static --disable-shared --enable-dma-addr=64 --enable-pp2 --enable-giu --enable-nmp --enable-sam=no --enable-neta=no"
 	echo "cflags:     $(grep -E '^CFLAGS =' "$MUSDK/Makefile" | sed 's/^CFLAGS = //')"
 	echo "ldflags:    -all-static (make time)"
+	echo "dsa_dev:    $DSA_DEV (FROM_CPU tag switch device number; 126=0, 116=2)"
 	echo "epoch:      SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH (kit commit time; fixes __DATE__/__TIME__)"
 	echo "target abi: $(file "$OUT/dp_fwd" | grep -oE 'for GNU/Linux [0-9.]+')"
 	echo "run as:     ./dp_fwd -g 2 -i eth0 -c 1 -a 1 -f dp-nmp-config.txt --no-stat   (cwd = directory holding the config)"

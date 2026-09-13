@@ -283,6 +283,17 @@ agnic_pport_rx(struct agnic_softc *sc, struct mbuf *m)
 		memcpy(sc->rx_last_hdr, d + PPORT_TAG_LEN, PPORT_HDR_LEN);
 		sc->rx_last_hdr_valid = 1;
 	}
+	/* xgs-npu-freebsd: dp_fwd stamps its host->front counters into the md reserved
+	 * bytes (agnic_pport_md.reserved1 at md offset 0x30); refresh them on every RX
+	 * frame so `sysctl dev.agnic.0.npu_*` reflects the NPU forwarder live, with no
+	 * dependency on the mvmgmt0 link. Zeros mean a dp_fwd without the counter patch. */
+	if (m->m_len >= PPORT_PREFIX) {
+		const uint8_t *rsv = d + PPORT_TAG_LEN + 48;	/* md reserved1 */
+		sc->npu_giu_rx   = le32dec(rsv);
+		sc->npu_pp2_tx   = le32dec(rsv + 4);
+		sc->npu_h2t_drop = le32dec(rsv + 8);
+		sc->npu_egr_drop = le32dec(rsv + 12);
+	}
 	m_adj(m, PPORT_PREFIX);			/* strip tag + header */
 	m->m_pkthdr.rcvif = pp->ifp[port];
 	pp->rx[port]++;

@@ -530,6 +530,14 @@ struct agnic_softc {
 	 */
 	uint8_t			rx_last_hdr[64];/* last 64B pport header seen on RX */
 	int			rx_last_hdr_valid;
+	/* xgs-npu-freebsd: dp_fwd's host->front counters, piggybacked by the NPU forwarder
+	 * in the RX pport md reserved bytes (md offset 0x30) and refreshed on every RX frame.
+	 * Exposed as sysctl dev.agnic.0.npu_* so host->front forwarding can be diagnosed
+	 * without the mvmgmt0 management link (which is flaky after a driver reload). */
+	uint32_t		npu_giu_rx;	/* frames dp_fwd received from the host (GIU) */
+	uint32_t		npu_pp2_tx;	/* frames dp_fwd sent to the switch (PP2/eth0) */
+	uint32_t		npu_h2t_drop;	/* dp_fwd host->front transform drops          */
+	uint32_t		npu_egr_drop;	/* dp_fwd PP2 TX-ring-full drops               */
 	int			tx_hdr_mode;	/* 0=zeros 1=copy-RX 2=magic       */
 	uint64_t		tx_hdr_magic;	/* 8B written LE at header[0]       */
 	int			tx_pkt_offset;	/* descriptor pkt_offset override  */

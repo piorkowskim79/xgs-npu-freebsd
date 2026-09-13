@@ -567,6 +567,17 @@ agnic_add_sysctls(struct agnic_softc *sc)
 	    &sc->tx_pkt_offset, 0, "TX descriptor pkt_offset (0 default)");
 	SYSCTL_ADD_INT(ctx, ch, OID_AUTO, "rx_last_hdr_valid", CTLFLAG_RD,
 	    &sc->rx_last_hdr_valid, 0, "a real RX pport header has been captured");
+	/* xgs-npu-freebsd: dp_fwd's host->front counters, piggybacked in the RX pport md
+	 * reserved bytes (see agnic_pport.c) so host->front forwarding can be read without
+	 * the flaky mvmgmt0 link. All zero => a dp_fwd built without the counter patch. */
+	SYSCTL_ADD_UINT(ctx, ch, OID_AUTO, "npu_giu_rx", CTLFLAG_RD,
+	    &sc->npu_giu_rx, 0, "dp_fwd: host->front frames received from the host (GIU)");
+	SYSCTL_ADD_UINT(ctx, ch, OID_AUTO, "npu_pp2_tx", CTLFLAG_RD,
+	    &sc->npu_pp2_tx, 0, "dp_fwd: host->front frames sent to the switch (PP2/eth0)");
+	SYSCTL_ADD_UINT(ctx, ch, OID_AUTO, "npu_h2t_drop", CTLFLAG_RD,
+	    &sc->npu_h2t_drop, 0, "dp_fwd: host->front transform drops");
+	SYSCTL_ADD_UINT(ctx, ch, OID_AUTO, "npu_egr_drop", CTLFLAG_RD,
+	    &sc->npu_egr_drop, 0, "dp_fwd: host->front PP2 TX-ring-full drops");
 }
 
 /* ------------------------------------------------------------------------- */
