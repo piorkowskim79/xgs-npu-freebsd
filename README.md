@@ -39,10 +39,11 @@ NPU data plane (`dp_fwd`) to carry traffic on the 116, and that replacement is
 | Control plane (barmap, CTRL, mgmt echo, INIT..ENABLE, link up) | **Measured OK** with stock NPU firmware | [docs/XGS126.md](docs/XGS126.md) |
 | `mvmgmt0` link to the NPU, SSH into it | **Measured OK** | same link-local as the 116 |
 | NW_AGENT port discovery (gives the 126 port table) | **Measured**: 16 entries, 14 usable (10 switch ports incl. 2 SFP, 4 SoC ports `eth1`–`eth4`) | [docs/XGS126.md](docs/XGS126.md) |
-| RX datapath with stock NPU firmware | **Measured: 0 frames**, before and after an SFOS boot | Sophos `usfp` forwards nothing without its host-side tables |
-| TX datapath with stock NPU firmware | frames leave the host on the trunk (counted, not dropped); nothing reaches the jack | same |
+| RX datapath, stock NPU firmware | **Measured: 0 frames** | Sophos `usfp` forwards nothing without its host-side tables |
+| RX datapath, `dp_fwd` on the NPU | **Measured: works** (real LAN frame decoded on `port1`, 2026-09-13) | [docs/XGS126.md](docs/XGS126.md) |
+| TX datapath to the front jacks | **not reaching the wire** with either data plane: frames leave the host, the LAN never sees the port MAC | forwarder host->front / switch-DSA path, open |
 | Host reload without reboot | **Measured**: NPU keeps the old session; stale-session handling added, unverified | [docs/CHANGES-FROM-UPSTREAM.md](docs/CHANGES-FROM-UPSTREAM.md) §9 |
-| Replacement NPU data plane (`dp_fwd`) | **Built** natively on a Pi 5, static, not yet run on the NPU | [docs/NPU-BUILD.md](docs/NPU-BUILD.md) |
+| Replacement NPU data plane (`dp_fwd`) | **Built and run**: RX works, TX egress + reload stability open | [docs/NPU-BUILD.md](docs/NPU-BUILD.md), [docs/XGS126.md](docs/XGS126.md) |
 | OPNsense port + plugin | Written, not built | see [docs/OPNSENSE.md](docs/OPNSENSE.md) |
 
 The honest summary: the host side of the driver is proven on a 126 up to and including the
