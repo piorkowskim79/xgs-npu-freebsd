@@ -44,7 +44,7 @@ echo "staged: /tmp/if_agnic.ko /tmp/dp/dp_fwd; WLAN on demand -> sh /tmp/wlan-up
 # 3. establish the data path (front ports carry traffic). Skippable.
 [ "${AUTO_DP:-1}" = "0" ] && { echo "AUTO_DP=0 -> skipping data-path bring-up"; exit 0; }
 [ -f "$ESP/no-autodp" ] && { echo "/mnt/xgs/no-autodp present -> skipping data-path bring-up"; exit 0; }
-[ -f /tmp/if_agnic.ko ] && [ -x /tmp/dp/dp_fwd ] || { echo "driver or dp_fwd missing -> cannot bring up data path"; exit 0; }
+[ -f /tmp/if_agnic.ko ] || { echo "if_agnic.ko missing -> cannot bring up data path"; exit 0; }
 
 NPU_LL="fe80::7e5a:1cff:febc:48b%mvmgmt0"        # firmware constant, measured on the 116 and 126
 DP_PORT="${DP_PORT:-port1}"                        # the front jack to DHCP (the home-LAN uplink)
@@ -53,6 +53,8 @@ NPUSSH="ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
 
 npu_up() { ifconfig mvmgmt0 inet6 -ifdisabled auto_linklocal up 2>/dev/null; }
 wait_npu() { k=0; while [ $k -lt 20 ]; do npu_up; ping6 -c1 -W2000 "$NPU_LL" >/dev/null 2>&1 && return 0; sleep 2; k=$((k+1)); done; return 1; }
+dp_running() { [ -n "$($NPUSSH 'pidof dp_fwd' 2>/dev/null)" ]; }
+wait_dp() { k=0; while [ $k -lt 40 ]; do dp_running && return 0; sleep 2; k=$((k+1)); done; return 1; }
 
 echo "--- data path: loading if_agnic ---"
 kldload /tmp/if_agnic.ko 2>/dev/null || kldstat | grep -q if_agnic || { echo "if_agnic load failed"; exit 0; }
@@ -61,12 +63,22 @@ k=0; while [ $k -lt 15 ] && ! ifconfig -l | grep -qw mvmgmt0; do sleep 1; k=$((k
 echo "--- data path: reaching the NPU over mvmgmt0 ---"
 if ! wait_npu; then echo "NPU not reachable over mvmgmt0 -> data path not established (use serial console)"; exit 0; fi
 
-echo "--- data path: relaying + starting dp_fwd on the NPU ---"
-$NPUSSH 'mkdir -p /tmp/dp' 2>/dev/null
-for f in dp_fwd dp-nmp-config.txt npu-run-dp_fwd.sh; do $NPUSSH "cat > /tmp/dp/$f" < "/tmp/dp/$f" 2>/dev/null; done
-$NPUSSH 'chmod +x /tmp/dp/dp_fwd /tmp/dp/npu-run-dp_fwd.sh; sh /tmp/dp/npu-run-dp_fwd.sh start' 2>&1 | tail -3
+# Does the NPU ALREADY run its own persistent dp_fwd (slot p2 / emmc2, via its
+# /etc/init.d/S99dp-fwd -> /persistent/dp/dp-boot.sh)? If so we must NOT start a second
+# one -- two dp_fwd crash the NPU -- we only bind it. Otherwise (stock NPU / slot p3) we
+# stage and start dp_fwd from /tmp as before, so this stick works in both worlds.
+if wait_dp; then
+	echo "--- data path: NPU already runs persistent dp_fwd (pid $($NPUSSH 'pidof dp_fwd' 2>/dev/null)); binding it, NOT starting a second ---"
+elif [ -x /tmp/dp/dp_fwd ]; then
+	echo "--- data path: no dp_fwd on the NPU -> staging + starting it from /tmp (volatile) ---"
+	$NPUSSH 'mkdir -p /tmp/dp' 2>/dev/null
+	for f in dp_fwd dp-nmp-config.txt npu-run-dp_fwd.sh; do $NPUSSH "cat > /tmp/dp/$f" < "/tmp/dp/$f" 2>/dev/null; done
+	$NPUSSH 'chmod +x /tmp/dp/dp_fwd /tmp/dp/npu-run-dp_fwd.sh; sh /tmp/dp/npu-run-dp_fwd.sh start' 2>&1 | tail -3
+else
+	echo "--- data path: no persistent dp_fwd and no /tmp/dp/dp_fwd -> nothing to bind (stock NPU forwards nothing) ---"
+fi
 
-echo "--- data path: warm-reloading if_agnic against dp_fwd ---"
+echo "--- data path: one clean warm-reload of if_agnic to bind dp_fwd ---"
 kldunload if_agnic 2>/dev/null; sleep 2; kldload /tmp/if_agnic.ko 2>/dev/null
 sleep 8
 npu_up
