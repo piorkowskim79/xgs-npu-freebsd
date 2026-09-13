@@ -175,3 +175,27 @@ The guard is the safety guarantee (a reattach can never wedge the host again, ev
 device indices are garbage or `dp_fwd` ignores the re-registered ring); the resync is the
 correctness half (healthy RX/TX after a reattach). Both are no-ops on the proven-good
 fresh-load path. Built and symbol-checked (127/127) against 15.1-RELEASE; not yet run.
+
+## 12. DSA device 0 on the 126 + host->front counter export (`build-dp_fwd-on-pi.sh`, `agnic_pport.c`, `agnic_txrx.c`, `if_agnic.h`)
+
+Measured on the XGS 126 (2026-09-13, night) and now **hardware-verified end to end**. Two coupled changes:
+
+- **DSA device 0.** The 126's RX frames carry DSA byte0 `0xc0` = switch device **0** (the 116 uses
+  device 2). `dp_fwd`'s `FROM_CPU` egress tag is built for `DSA_DEV` (default 0 in
+  `build-dp_fwd-on-pi.sh`, `2` only for the 116). With device 2 the 88E6193X silently dropped the
+  CPU-origin frame before the front jack; with device 0 it forwards. This was the entire TX-egress
+  fault — not the switch config, and not the forwarder or host driver.
+
+- **Counter export without `mvmgmt0`.** `dp_fwd` writes its four host->front counters
+  (`giu_rx`/`pp2_tx`/`h2t_drop`/`egr_full_drop`) into the reserved in-band metadata bytes (offset
+  0x30) of every RX frame; `agnic_pport.c` reads them in the RX demux before the prefix is stripped
+  and stores them in `struct agnic_softc`; `agnic_txrx.c` exposes them as
+  `dev.agnic.0.npu_giu_rx / npu_pp2_tx / npu_h2t_drop / npu_egr_drop`. This makes the decisive TX
+  measurement readable straight from the host, without needing `mvmgmt0` alive during the burst.
+
+**Verified 2026-09-13 night** with the reattach fix (#11), device-0 `dp_fwd` (`45dcb658`) and the
+counter driver (`48d03df5`) on the self-starting stick: clean warm reload (no storm, `mvmgmt0`
+survived), then **DHCP lease from the home-LAN router on `port1` and 15/15 ICMP round-trips, 0%
+loss**, with `npu_giu_rx == npu_pp2_tx`, all drops 0. RX and TX both proven through the stock 126
+switch. Changes #11 and #12 are together the datapath proof the project was blocked on. The only
+remaining work for durable operation is persistence (dp_fwd in an NPU rootfs), not egress.
