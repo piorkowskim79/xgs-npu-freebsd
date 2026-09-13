@@ -87,6 +87,7 @@ static void	agnic_rx_poll(void *xsc);
 static void	agnic_rx_task(void *ctx, int pending);
 static int	agnic_rx_service(struct agnic_softc *sc);
 static void	agnic_bp_refill_locked(struct agnic_softc *sc);
+static void	agnic_txrx_resync_indices(struct agnic_softc *sc);
 static void	agnic_txrx_free_rings(struct agnic_softc *sc);
 
 /* RX poll cadence in ticks from hw.agnic.rx_poll_ms (never below one tick). */
@@ -733,6 +734,48 @@ agnic_txrx_dbell_kick(struct agnic_softc *sc)
 /* ------------------------------------------------------------------------- */
 
 /*
+ * Reattach resync. A kldload over a still-running NPU data plane (dp_fwd) re-allocates
+ * the host rings and hard-zeroes the six BAR0 index words, but the device keeps its own
+ * nonzero producer/consumer cursors from the previous session. Left uncorrected, the RX
+ * consumer (0) never equals the device producer and agnic_rx_service reaps the stale
+ * 256-entry window forever -- the 2026-09-13 "delivered 1 / +256 dropped" storm that
+ * pinned a core and hung detach. Here we adopt the device's live cursors so the host and
+ * device agree from the first pass. On a genuine fresh load every device word reads 0, so
+ * every assignment below is 0 and this is a strict no-op.
+ *
+ * ORDERING IS LOAD-BEARING: this MUST run after CC_PF_ENABLE and BEFORE promisc-enable and
+ * the NW_AGENT/pport bring-up. Pre-promisc the NPU forwards no tagged frames, so on a fresh
+ * load the RX producer is still 0 when we read it; if this were moved after promisc it would
+ * silently discard every frame the device produced between ENABLE and this read, on every
+ * start. The reap-loop guard in agnic_rx_service is the safety backstop if the adopted value
+ * is briefly wrong (or if dp_fwd ignores the re-registered ring): it can no longer spin.
+ */
+static void
+agnic_txrx_resync_indices(struct agnic_softc *sc)
+{
+	struct agnic_data_ring *rx = &sc->rx_ring;
+	struct agnic_data_ring *bp = &sc->bp_ring;
+	struct agnic_data_ring *tx = &sc->tx_ring;
+	uint32_t rxp, txc, bpc;
+
+	rxp = AGNIC_RD4(sc, AGNIC_BAR0, rx->prod_bar_off) & (rx->count - 1);
+	rx->cons_shadow = rxp;		/* skip anything the device already produced */
+	txc = AGNIC_RD4(sc, AGNIC_BAR0, tx->cons_bar_off) & (tx->count - 1);
+	tx->prod_shadow = txc;		/* align our producer with the device consumer */
+	bpc = AGNIC_RD4(sc, AGNIC_BAR0, bp->cons_bar_off) & (bp->count - 1);
+	bp->cons_shadow = bpc;		/* bookkeeping only; refill reads the BAR live */
+
+	atomic_thread_fence_rel();
+	AGNIC_WR4(sc, AGNIC_BAR0, rx->cons_bar_off, rx->cons_shadow);
+	AGNIC_WR4(sc, AGNIC_BAR0, tx->prod_bar_off, tx->prod_shadow);
+	bus_barrier(sc->bar[AGNIC_BAR0], 0, sc->bar_size[AGNIC_BAR0],
+	    BUS_SPACE_BARRIER_WRITE);
+	device_printf(sc->dev,
+	    "[Phase 3b] ring resync: rx_cons<-%u tx_prod<-%u bp_cons<-%u "
+	    "(0/0/0 = fresh load)\n", rxp, txc, bpc);
+}
+
+/*
  * Auto-start the GIU trunk datapath: CC_PF_ENABLE, start RX servicing, put the
  * trunk in promiscuous mode, then bring up the NW_AGENT front-panel ports, the
  * mvmgmt0 NPU link, and the pport demux. Called once from the config hook after
@@ -783,6 +826,14 @@ agnic_datapath_start(struct agnic_softc *sc)
 		device_printf(dev, "P3b: CC_PF_ENABLE OK (attempt %d)\n",
 		    attempt + 1);
 	}
+
+	/*
+	 * Adopt the device's live ring cursors NOW -- after ENABLE, before promisc
+	 * below -- so a reattach over a running dp_fwd starts aligned instead of
+	 * reaping the stale RX window (see agnic_txrx_resync_indices). No reaper is
+	 * running yet (if_running still 0), so no lock is needed.
+	 */
+	agnic_txrx_resync_indices(sc);
 
 	/*
 	 * Diagnostic: ask the NPU for the current link state (best effort; the
@@ -972,7 +1023,10 @@ agnic_giu_tx(struct agnic_softc *sc, struct mbuf *m)
 
 	prod = tx->prod_shadow;
 	next = AGNIC_RING_INC(prod, tx->count);
-	cons = AGNIC_RD4(sc, AGNIC_BAR0, tx->cons_bar_off);
+	/* Mask like the RX/BP index reads: a stale/garbage device consumer (>= count,
+	 * e.g. after a reattach) would break the next == cons full-test. count is a
+	 * power of two, so & (count - 1) is the modulo. */
+	cons = AGNIC_RD4(sc, AGNIC_BAR0, tx->cons_bar_off) & (tx->count - 1);
 	if (next == cons) {			/* ring full: device hasn't drained */
 		mtx_unlock(&sc->tx_mtx);
 		sc->tx_dropped++;
@@ -1168,7 +1222,10 @@ agnic_rx_service(struct agnic_softc *sc)
 	}
 	ring = (struct agnic_rx_desc *)rx->mem.vaddr;
 
-	prod = AGNIC_RD4(sc, AGNIC_BAR0, rx->prod_bar_off);
+	/* Mask to the ring range: a stale/garbage device producer (>= count, e.g. after
+	 * a reattach) would make cons_shadow != prod unsatisfiable and spin the reap loop
+	 * to its cap every pass. count is a power of two, so & (count - 1) is the modulo. */
+	prod = AGNIC_RD4(sc, AGNIC_BAR0, rx->prod_bar_off) & (rx->count - 1);
 	atomic_thread_fence_acq();
 	bus_dmamap_sync(rx->mem.tag, rx->mem.map,
 	    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
@@ -1256,7 +1313,15 @@ agnic_rx_service(struct agnic_softc *sc)
 	}
 	/* Self-healing bpool top-up on EVERY pass, even when n == 0. */
 	agnic_bp_refill_locked(sc);
-	more = (guard >= rx->count);	/* hit the cap: the ring may hold more */
+	/* Re-arm only if the device genuinely advanced its producer during this pass
+	 * (poll-until-empty). The old `guard >= rx->count` test could latch true ONLY in
+	 * the desync/garbage case -- a healthy 256-slot ring holds at most 255 outstanding,
+	 * so guard tops out at 255 -- which is exactly the runaway that never drained and
+	 * hung detach. A fresh masked producer read is provably terminating: each pass
+	 * converges to cons_shadow == prod, cross-pass re-arm stays bounded by
+	 * AGNIC_RX_MAX_PASSES then the 1 Hz callout. Still under rx_mtx (unlock is below). */
+	prod = AGNIC_RD4(sc, AGNIC_BAR0, rx->prod_bar_off) & (rx->count - 1);
+	more = (rx->cons_shadow != prod);
 
 	{
 		uint64_t total = sc->rx_frames;

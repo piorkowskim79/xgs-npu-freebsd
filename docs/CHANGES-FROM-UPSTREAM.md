@@ -143,3 +143,35 @@ said `port1..port9` say `port1..portN`.
 - `mvmgmt0` still has the fixed MAC `00:00:12:13:14:15` and the ports still use
   `02:81:00:00:00:NN`. Two XGS boxes on one L2 segment would collide; the Linux driver
   derives a per-unit middle from DMI. Worth porting once the datapath is proven.
+
+## 11. RX-ring resync + reap guard on reattach (`agnic_txrx.c`, `if_agnic.h`)
+
+Measured on the XGS 126 (2026-09-13): a `kldunload`/`kldload` over a still-running NPU data
+plane (`dp_fwd`) sent `agnic_rx_service()` into a runaway -- `RX frames delivered: 1
+(+256 this pass, N dropped)` without end, a pinned core, a flooded console, and a `kldunload`
+that never returned (the box needed a mains cycle). Cause: bring-up hard-zeroes the six BAR0
+index words and the ring shadows, but the device keeps its own nonzero producer/consumer
+cursors from the prior session; the RX consumer (0) then never meets the device producer.
+Two coordinated fixes:
+
+- **Reap guard.** `agnic_rx_service()` read the device RX producer raw; an out-of-range value
+  made `cons_shadow != prod` unsatisfiable, so the loop always hit its `guard < count` cap and
+  `more = (guard >= count)` latched true forever, re-arming the poll endlessly and blocking
+  detach. The producer is now masked `& (rx->count - 1)` (as `agnic_bp_refill_locked` already
+  did for the bpool), and `more` is re-derived from a fresh masked producer read
+  (`cons_shadow != prod`) instead of the cap. A masked producer is in `[0,count)`, so the loop
+  provably converges on `cons == prod` in at most `count-1` steps and can never spin; the TX
+  consumer read in `agnic_giu_tx()` is masked the same way. This alone stops the wedge.
+
+- **Reattach resync.** New `agnic_txrx_resync_indices()`, called from `agnic_datapath_start()`
+  right after `CC_PF_ENABLE` and before promisc/NW_AGENT/pport bring-up, adopts the device's
+  live RX-producer / TX-consumer / bpool-consumer into the host shadows so a reattach starts
+  aligned with `dp_fwd` and yields a healthy session, not merely a non-fatal one. On a genuine
+  fresh load every device word reads 0 (pre-promisc the NPU forwards nothing), so it is a
+  strict no-op -- the ordering (after ENABLE, before promisc) is load-bearing and documented at
+  the call site. A power-of-two `CTASSERT` on the ring lengths guards the `& (count-1)` modulo.
+
+The guard is the safety guarantee (a reattach can never wedge the host again, even if the
+device indices are garbage or `dp_fwd` ignores the re-registered ring); the resync is the
+correctness half (healthy RX/TX after a reattach). Both are no-ops on the proven-good
+fresh-load path. Built and symbol-checked (127/127) against 15.1-RELEASE; not yet run.

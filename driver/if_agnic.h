@@ -230,6 +230,13 @@ struct agnic_mgmt_ring {
 #define	AGNIC_RX_RING_LEN		256
 #define	AGNIC_TX_RING_LEN		256
 #define	AGNIC_BP_RING_LEN		256
+/* AGNIC_RING_INC and the device-index masking in agnic_txrx.c use & (count - 1) as the
+ * ring modulo, correct only for power-of-two lengths. Enforce it at compile time. */
+#ifdef CTASSERT
+CTASSERT((AGNIC_RX_RING_LEN & (AGNIC_RX_RING_LEN - 1)) == 0);
+CTASSERT((AGNIC_TX_RING_LEN & (AGNIC_TX_RING_LEN - 1)) == 0);
+CTASSERT((AGNIC_BP_RING_LEN & (AGNIC_BP_RING_LEN - 1)) == 0);
+#endif
 
 /*
  * BAR0 ring_indices_arr slot assignment. Mgmt already owns slots 0..3
