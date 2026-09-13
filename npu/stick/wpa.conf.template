@@ -1,0 +1,7 @@
+# Renamed to wpa.conf on the stick's ESP. 2.4 GHz-capable SSID (the RTL8188CUS is 2.4 GHz only).
+# The PSK sits here in the clear -- treat the stick as holding this secret. Either the plaintext
+# psk="..." line OR a 64-hex psk from `wpa_passphrase "<ssid>" "<pass>"` works.
+network={
+	ssid="WLANonymous_5G"
+	psk="<PSK-OR-64HEX-HERE>"
+}

@@ -1,0 +1,10 @@
+#!/bin/sh
+# XGS live-stick auto-start (replaces the memstick's bsdinstall launcher, same length).
+# Mounts the FAT payload and runs its autostart (WLAN + sshd) in the background, then
+# leaves a root shell on the serial console. Everything real lives on the ESP / in /tmp.
+for d in /dev/msdosfs/EFISYS /dev/da0s1 /dev/da1s1 /dev/da2s1 /dev/da3s1; do
+	mount -t msdosfs "$d" /mnt 2>/dev/null && break
+done
+[ -f /mnt/xgs/autostart.sh ] && sh /mnt/xgs/autostart.sh >/tmp/autostart.log 2>&1 &
+echo "XGS stick: autostart backgrounded (WLAN + sshd); log /tmp/autostart.log"
+exec /bin/sh
