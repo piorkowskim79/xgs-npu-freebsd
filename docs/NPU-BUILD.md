@@ -80,6 +80,24 @@ upstream's `build_fwd.sh` does, builds, verifies (aarch64, static, no interprete
 forwarder symbols) and refuses to publish anything that fails a check. It also verifies
 upstream's payload against its `MANIFEST` and extracts the fallback files.
 
+## Getting a network onto the live stick
+
+The stick's root is read-only, so everything below lives in `/tmp` and is gone after a
+reboot. Two helpers in `npu/`, both served by the Pi as well:
+
+- [`npu/xgs-wlan.sh`](../npu/xgs-wlan.sh): joins a WPA2 network through a USB WLAN adapter
+  (paste it at the serial console, it asks for SSID and passphrase). Measured 2026-09-13: a
+  Netgear WNA1000M (USB `0846:9041`, RTL8188CUS) attaches as `rtwn0` with the in-tree
+  driver, but on the first try the USB link flapped every few seconds (descriptor reads
+  failing, "set address failed"), which is power or contact, not the driver.
+- [`npu/xgs-ssh.sh`](../npu/xgs-ssh.sh): starts `sshd` with host keys and `authorized_keys`
+  in `/tmp/ssh`, key-only root login. `fetch` it from the Pi once the stick has an address:
+  `fetch -o /tmp/xgs-ssh.sh http://<pi>:8000/xgs-ssh.sh && sh /tmp/xgs-ssh.sh http://<pi>:8000`.
+  The Pi serves `authorized_keys` next to it.
+
+The Pi's file server is `python3 -m http.server 8000` in `~/npu-build/out`, started
+detached; it does not survive a reboot of the Pi (restart it the same way).
+
 ## Procedure: first run on the XGS 126 (not yet executed)
 
 Prerequisites: USB Ethernet adapter on the XGS host (`ure0`/`axge0`), live stick booted with

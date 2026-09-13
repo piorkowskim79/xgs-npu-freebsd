@@ -116,6 +116,7 @@ Per-device counters and the TX-header experiments live under `dev.agnic.0`.
 | `tools/mkstick.sh` | build the live test stick from the stock 15.1 memstick image: serial console + driver + stage script | MIT |
 | `build/` (git-ignored) | `if_agnic.ko`, the stick image, `SHA256SUMS` | — |
 | `npu/build-dp_fwd-on-pi.sh` | native, static, pinned build of upstream's NPU data plane (`dp_fwd`) on an aarch64 Linux host (Raspberry Pi 5) | MIT |
+| `npu/xgs-wlan.sh`, `npu/xgs-ssh.sh` | live stick: join a WLAN through a USB adapter, start a key-only `sshd` from `/tmp` | MIT |
 | `npu/npu-run-dp_fwd.sh`, `npu/xgs-fetch-and-relay.sh` | volatile `dp_fwd` test from the NPU's `/tmp`: NPU-side start/stop, host-side fetch + relay over `mvmgmt0` (untested) | MIT |
 | `docs/` | changes, test bed, test plan, OPNsense integration, XGS 126 facts, NPU build | MIT |
 
