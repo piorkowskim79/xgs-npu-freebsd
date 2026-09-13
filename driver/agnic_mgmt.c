@@ -587,6 +587,34 @@ agnic_mgmt_bringup(struct agnic_softc *sc)
 	AGNIC_WR4(sc, AGNIC_BAR0, sc->notif_ring.prod_bar_off, 0);
 	AGNIC_WR4(sc, AGNIC_BAR0, sc->notif_ring.cons_bar_off, 0);
 
+	/*
+	 * Stale host session (XGS 126, measured 2026-09-13): after a kldunload the
+	 * NPU keeps HOST_MGMT_READY and DEV_MGMT_READY set and keeps polling the OLD
+	 * ring addresses, so a reload sees DEV_MGMT_READY at once and every command
+	 * times out. Drop HOST_MGMT_READY first so the NPU can observe a fresh 0->1
+	 * transition after we republish, and give it a moment to notice. Harmless on
+	 * a fresh NPU: the bit is clear there anyway. Whether the stock NMP reacts to
+	 * the drop is Unverified; a mains cycle remains the known-good recovery.
+	 */
+	{
+		uint32_t st = AGNIC_RD4(sc, AGNIC_BAR0,
+		    sc->giu_off + AGNIC_GIU_STATUS_OFF);
+
+		if (st & AGNIC_CFG_STATUS_HOST_MGMT_READY) {
+			device_printf(dev, "P3a: stale host session (status 0x%08x); "
+			    "clearing HOST_MGMT_READY before republishing\n", st);
+			AGNIC_WR4(sc, AGNIC_BAR0, sc->giu_off + AGNIC_GIU_STATUS_OFF,
+			    st & ~AGNIC_CFG_STATUS_HOST_MGMT_READY);
+			bus_barrier(sc->bar[AGNIC_BAR0], 0, sc->bar_size[AGNIC_BAR0],
+			    BUS_SPACE_BARRIER_WRITE);
+			pause("agstale", hz / 2);
+			(void)agnic_poll(sc, AGNIC_BAR0,
+			    sc->giu_off + AGNIC_GIU_STATUS_OFF,
+			    AGNIC_CFG_STATUS_DEV_MGMT_READY, 0, 2000,
+			    "DEV_MGMT_READY to clear (stale session)");
+		}
+	}
+
 	/* --- Publish both q_hw_info blocks into config_mem. --- */
 	agnic_mgmt_publish_q(sc, sc->giu_off + AGNIC_GIU_CMD_Q_OFF,
 	    &sc->cmd_ring);

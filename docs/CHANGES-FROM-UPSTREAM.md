@@ -112,7 +112,17 @@ Added the Linux check `host_headroom + pkt_offset + len <= buf_size` next to the
 `len <= buf_size`, so a bogus `pkt_offset` cannot make `m_adj()` + length exceed the
 cluster.
 
-## 9. Cosmetics
+## 9. Stale-session handling after a host reload (`agnic_mgmt.c`, `agnic_pcinet.c`)
+
+Measured on the XGS 126 (2026-09-13): after `kldunload`/`kldload` the NPU keeps
+`HOST_MGMT_READY`/`DEV_MGMT_READY` set and polls the previous rings, so the reload passes
+the handshake and then every mgmt command times out; `mvmgmt0` finds no ready pattern
+either (status 0, old ring pointers still in the descriptor). Now the mgmt bring-up
+clears a pre-set `HOST_MGMT_READY` and waits briefly before republishing, and the pcinet
+bring-up re-uses the mailbox when it holds stale pointers. Whether the stock NPU firmware
+reacts is Unverified; a mains cycle remains the known-good recovery.
+
+## 10. Cosmetics
 
 Device description now reads "Marvell AGNIC GIU-NIC (Sophos XGS NPU, PF)"; log lines that
 said `port1..port9` say `port1..portN`.

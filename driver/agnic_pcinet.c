@@ -249,15 +249,32 @@ agnic_pcinet_bringup(struct agnic_softc *sc)
 	}
 	st = pc_cfg_rd(p, PC_CFG_STATUS);
 	if (st != PC_PATTERN_READY) {
-		device_printf(dev, "P5: no pcinet ready pattern (status 0x%08x "
-		    "cfg[0..3]=%08x %08x %08x %08x); abort\n", st,
-		    pc_cfg_rd(p, 0), pc_cfg_rd(p, 4), pc_cfg_rd(p, 8),
-		    pc_cfg_rd(p, 0xc));
-		free(p, M_AGNIC_PC);
-		return (ENXIO);
+		uint64_t oldrx = ((uint64_t)pc_cfg_rd(p, PC_CFG_RX_Q_PHYS + 4) << 32) |
+		    pc_cfg_rd(p, PC_CFG_RX_Q_PHYS);
+
+		/*
+		 * Stale host session (XGS 126, 2026-09-13): the NPU publishes the
+		 * ready pattern once per NPU boot; after a host reload the status
+		 * word is 0 and the descriptor still holds the previous host's ring
+		 * addresses. Re-use the mailbox: overwrite the ring pointers with ours
+		 * and run the link handshake anyway. If the NPU ignores it, mvmgmt0
+		 * simply never reaches ESTABLISHED; nothing else is affected.
+		 */
+		if (st != 0 || oldrx == 0) {
+			device_printf(dev, "P5: no pcinet ready pattern (status 0x%08x "
+			    "cfg[0..3]=%08x %08x %08x %08x); abort\n", st,
+			    pc_cfg_rd(p, 0), pc_cfg_rd(p, 4), pc_cfg_rd(p, 8),
+			    pc_cfg_rd(p, 0xc));
+			free(p, M_AGNIC_PC);
+			return (ENXIO);
+		}
+		device_printf(dev, "P5: no ready pattern but stale rings published "
+		    "(rx 0x%jx): previous host session; re-using the mailbox\n",
+		    (uintmax_t)oldrx);
+	} else {
+		device_printf(dev, "P5: pcinet ready pattern seen; acking\n");
+		pc_cfg_wr(p, PC_CFG_STATUS, PC_PATTERN_ACK);
 	}
-	device_printf(dev, "P5: pcinet ready pattern seen; acking\n");
-	pc_cfg_wr(p, PC_CFG_STATUS, PC_PATTERN_ACK);
 
 	/* Allocate the two rings. */
 	error = pc_alloc_ring(sc, &p->rxq_ctrl, &p->rxq_ents, &p->rxq_bufs,
