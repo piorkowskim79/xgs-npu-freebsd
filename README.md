@@ -33,18 +33,22 @@ NPU data plane (`dp_fwd`) to carry traffic on the 116, and that replacement is
 | Piece | State on XGS 126 | Evidence |
 |---|---|---|
 | PCI endpoint `11ab:7080` present | **Measured** | GRUB `lspci` on the box, 2026-09-13 |
-| BAR sizes 1M / 16M / 16M | Unverified | needs `pciconf -lbv` under FreeBSD |
-| Driver builds for FreeBSD 15.1 | **Cross-built and symbol-checked** (`build/if_agnic.ko`) | `tools/crossbuild-ko.sh` (unity build with clang, no FreeBSD host); every external symbol resolved against the 15.1-RELEASE GENERIC kernel (`tools/elfsyms.py`); not yet loaded on hardware |
-| Live test stick (FreeBSD 15.1 memstick + driver + stage script) | **Image built**, not booted yet | `tools/mkstick.sh`; see [docs/TESTBED.md](docs/TESTBED.md) |
-| Control plane (barmap, CTRL, mgmt echo) | Unverified | Measured upstream on XGS 116 only |
-| `mvmgmt0` link to the NPU, SSH into it | Unverified | Measured upstream on XGS 116 only |
-| NW_AGENT port discovery (gives the 126 port table) | Unverified | code targets stock firmware; Measured upstream on 116 |
-| RX datapath | Unverified | upstream: written, not verified end to end |
-| TX datapath to the front jacks | Unverified | upstream: NPU dropped egress with stock firmware |
+| BAR sizes 1M / 16M / 16M, 16 MSI-X | **Measured** | first run, 2026-09-13 |
+| Driver builds for FreeBSD 15.1 | **Cross-built and symbol-checked** (`build/if_agnic.ko`) | `tools/crossbuild-ko.sh` (unity build with clang, no FreeBSD host); every external symbol resolved against the 15.1-RELEASE GENERIC kernel (`tools/elfsyms.py`) |
+| Live test stick (FreeBSD 15.1 memstick + driver + stage script) | **Booted on the 126**, serial console, driver loaded | `tools/mkstick.sh`; [docs/TESTBED.md](docs/TESTBED.md) |
+| Control plane (barmap, CTRL, mgmt echo, INIT..ENABLE, link up) | **Measured OK** with stock NPU firmware | [docs/XGS126.md](docs/XGS126.md) |
+| `mvmgmt0` link to the NPU, SSH into it | **Measured OK** | same link-local as the 116 |
+| NW_AGENT port discovery (gives the 126 port table) | **Measured**: 16 entries, 14 usable (10 switch ports incl. 2 SFP, 4 SoC ports `eth1`–`eth4`) | [docs/XGS126.md](docs/XGS126.md) |
+| RX datapath with stock NPU firmware | **Measured: 0 frames**, before and after an SFOS boot | Sophos `usfp` forwards nothing without its host-side tables |
+| TX datapath with stock NPU firmware | frames leave the host on the trunk (counted, not dropped); nothing reaches the jack | same |
+| Host reload without reboot | **Measured**: NPU keeps the old session; stale-session handling added, unverified | [docs/CHANGES-FROM-UPSTREAM.md](docs/CHANGES-FROM-UPSTREAM.md) §9 |
+| Replacement NPU data plane (`dp_fwd`) | **Built** natively on a Pi 5, static, not yet run on the NPU | [docs/NPU-BUILD.md](docs/NPU-BUILD.md) |
 | OPNsense port + plugin | Written, not built | see [docs/OPNSENSE.md](docs/OPNSENSE.md) |
 
-The honest summary: this repository makes the driver **buildable, configurable and
-testable on a 126**, and documents how to get there. It does not claim a working port.
+The honest summary: the host side of the driver is proven on a 126 up to and including the
+data-plane handshake; with Sophos's own NPU firmware no front-panel traffic flows in either
+direction. The next step is the replacement data plane on the NPU, which is built and staged
+but has not run yet. This is not a working port.
 
 ## What changed against upstream
 
@@ -111,7 +115,9 @@ Per-device counters and the TX-header experiments live under `dev.agnic.0`.
 | `tools/ufs2tool.py`, `tools/fat16tool.py` | read (and same-length patch) UFS2 / read FAT16 inside a raw image, from any host | MIT |
 | `tools/mkstick.sh` | build the live test stick from the stock 15.1 memstick image: serial console + driver + stage script | MIT |
 | `build/` (git-ignored) | `if_agnic.ko`, the stick image, `SHA256SUMS` | — |
-| `docs/` | changes, test bed, test plan, OPNsense integration, XGS 126 facts | MIT |
+| `npu/build-dp_fwd-on-pi.sh` | native, static, pinned build of upstream's NPU data plane (`dp_fwd`) on an aarch64 Linux host (Raspberry Pi 5) | MIT |
+| `npu/npu-run-dp_fwd.sh`, `npu/xgs-fetch-and-relay.sh` | volatile `dp_fwd` test from the NPU's `/tmp`: NPU-side start/stop, host-side fetch + relay over `mvmgmt0` (untested) | MIT |
+| `docs/` | changes, test bed, test plan, OPNsense integration, XGS 126 facts, NPU build | MIT |
 
 ## Relationship to upstream
 
