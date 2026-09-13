@@ -1,34 +1,20 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 # autostart.sh -- runs from the stick's FAT payload at boot (via the patched /etc/rc.local).
-# Brings up the USB WLAN from wpa.conf, then a key-only sshd, all in /tmp (root is read-only),
-# and stages the NPU toolkit into /tmp/dp. No console typing, no pasting. UNTESTED until first boot.
+# It does NOT start WLAN. It starts a key-only sshd that listens on ALL interfaces (every
+# network port) on port 22, stages the NPU toolkit into /tmp, and then ESTABLISHES THE DATA
+# PATH so the front ports carry traffic after a plain reboot (load if_agnic, start dp_fwd on
+# the NPU, warm-reload the driver against it, DHCP port1). You then reach the box over that
+# front port. WLAN is available only on demand: run  sh /tmp/wlan-up.sh  from the serial
+# console. This is the host-side self-heal, not NPU persistence (a host reboot still resets
+# the NPU to stock usfp; this re-establishes the working path each boot).
+# Skip the data-path step with AUTO_DP=0 or a /mnt/xgs/no-autodp file.
 ESP=/mnt/xgs
 echo "=== autostart $(date 2>/dev/null || echo) ==="
 
-# 1. wait for the RTL8188CUS radio to settle -- it flaps on USB enumerate
-i=0; while [ $i -lt 30 ]; do
-	sysctl -n net.wlan.devices 2>/dev/null | grep -qw rtwn0 && break
-	sleep 1; i=$((i+1))
-done
-sysctl -n net.wlan.devices 2>/dev/null | grep -qw rtwn0 || { echo "no rtwn0 after 30s"; }
-
-# 2. WLAN join, retried (the adapter drops link on enumerate)
-ifconfig wlan0 >/dev/null 2>&1 || ifconfig wlan0 create wlandev rtwn0
-ifconfig wlan0 up
-n=0
-while [ $n -lt 6 ]; do
-	pkill wpa_supplicant 2>/dev/null
-	wpa_supplicant -B -i wlan0 -c "$ESP/wpa.conf" 2>/dev/null
-	j=0; while [ $j -lt 20 ]; do ifconfig wlan0 2>/dev/null | grep -q 'status: associated' && break; sleep 1; j=$((j+1)); done
-	if ifconfig wlan0 2>/dev/null | grep -q 'status: associated'; then
-		dhclient wlan0 2>/dev/null && ifconfig wlan0 | grep -q 'inet ' && break
-	fi
-	n=$((n+1)); sleep 3
-done
-echo "wlan0: $(ifconfig wlan0 2>/dev/null | awk '/status:|inet /{print}' | tr '\n' ' ')"
-
-# 3. key-only sshd, host keys + authorized_keys in /tmp
+# 1. key-only sshd on ALL interfaces, port 22 (host keys + authorized_keys in /tmp).
+#    No ListenAddress -> sshd binds the wildcard (0.0.0.0 and ::), so it answers on whatever
+#    front port / interface later gets an address. No WLAN is started here.
 mkdir -p /tmp/ssh; chmod 700 /tmp/ssh
 cp "$ESP/authorized_keys" /tmp/ssh/authorized_keys 2>/dev/null; chmod 600 /tmp/ssh/authorized_keys 2>/dev/null
 for t in ed25519 rsa; do [ -f /tmp/ssh/host_$t ] || ssh-keygen -q -t $t -N '' -f /tmp/ssh/host_$t; done
@@ -44,12 +30,52 @@ PidFile /tmp/ssh/sshd.pid
 StrictModes no
 UseDNS no
 CFG
-/usr/sbin/sshd -f /tmp/ssh/sshd_config && echo "sshd up"
+/usr/sbin/sshd -f /tmp/ssh/sshd_config && echo "sshd up (all interfaces, port 22)"
 
-# 4. stage the NPU toolkit + driver so I can work immediately over SSH
+# 2. stage the NPU toolkit + driver + the MANUAL wlan script into /tmp
 mkdir -p /tmp/dp
 cp "$ESP"/dp_fwd "$ESP"/dp-nmp-config.txt "$ESP"/npu-run-dp_fwd.sh /tmp/dp/ 2>/dev/null
 chmod +x /tmp/dp/dp_fwd /tmp/dp/npu-run-dp_fwd.sh 2>/dev/null
 cp "$ESP"/mvmgt.x86 /tmp/mvmgt.x86 2>/dev/null; chmod 600 /tmp/mvmgt.x86 2>/dev/null
 cp "$ESP"/if_agnic.ko /tmp/if_agnic.ko 2>/dev/null
-echo "=== autostart done; ssh root@$(ifconfig wlan0 2>/dev/null | awk '/inet /{print $2; exit}') ==="
+cp "$ESP"/wlan-up.sh /tmp/wlan-up.sh 2>/dev/null; chmod +x /tmp/wlan-up.sh 2>/dev/null
+echo "staged: /tmp/if_agnic.ko /tmp/dp/dp_fwd; WLAN on demand -> sh /tmp/wlan-up.sh"
+
+# 3. establish the data path (front ports carry traffic). Skippable.
+[ "${AUTO_DP:-1}" = "0" ] && { echo "AUTO_DP=0 -> skipping data-path bring-up"; exit 0; }
+[ -f "$ESP/no-autodp" ] && { echo "/mnt/xgs/no-autodp present -> skipping data-path bring-up"; exit 0; }
+[ -f /tmp/if_agnic.ko ] && [ -x /tmp/dp/dp_fwd ] || { echo "driver or dp_fwd missing -> cannot bring up data path"; exit 0; }
+
+NPU_LL="fe80::7e5a:1cff:febc:48b%mvmgmt0"        # firmware constant, measured on the 116 and 126
+DP_PORT="${DP_PORT:-port1}"                        # the front jack to DHCP (the home-LAN uplink)
+KEY=/tmp/mvmgt.x86
+NPUSSH="ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR root@$NPU_LL"
+
+npu_up() { ifconfig mvmgmt0 inet6 -ifdisabled auto_linklocal up 2>/dev/null; }
+wait_npu() { k=0; while [ $k -lt 20 ]; do npu_up; ping6 -c1 -W2000 "$NPU_LL" >/dev/null 2>&1 && return 0; sleep 2; k=$((k+1)); done; return 1; }
+
+echo "--- data path: loading if_agnic ---"
+kldload /tmp/if_agnic.ko 2>/dev/null || kldstat | grep -q if_agnic || { echo "if_agnic load failed"; exit 0; }
+k=0; while [ $k -lt 15 ] && ! ifconfig -l | grep -qw mvmgmt0; do sleep 1; k=$((k+1)); done
+
+echo "--- data path: reaching the NPU over mvmgmt0 ---"
+if ! wait_npu; then echo "NPU not reachable over mvmgmt0 -> data path not established (use serial console)"; exit 0; fi
+
+echo "--- data path: relaying + starting dp_fwd on the NPU ---"
+$NPUSSH 'mkdir -p /tmp/dp' 2>/dev/null
+for f in dp_fwd dp-nmp-config.txt npu-run-dp_fwd.sh; do $NPUSSH "cat > /tmp/dp/$f" < "/tmp/dp/$f" 2>/dev/null; done
+$NPUSSH 'chmod +x /tmp/dp/dp_fwd /tmp/dp/npu-run-dp_fwd.sh; sh /tmp/dp/npu-run-dp_fwd.sh start' 2>&1 | tail -3
+
+echo "--- data path: warm-reloading if_agnic against dp_fwd ---"
+kldunload if_agnic 2>/dev/null; sleep 2; kldload /tmp/if_agnic.ko 2>/dev/null
+sleep 8
+npu_up
+
+echo "--- data path: DHCP on $DP_PORT ---"
+if ifconfig "$DP_PORT" >/dev/null 2>&1; then
+	timeout 30 dhclient "$DP_PORT" 2>&1 | grep -E 'DHCPACK|bound' || echo "dhclient $DP_PORT: no lease (cable? DHCP server?)"
+	echo "$DP_PORT: $(ifconfig "$DP_PORT" 2>/dev/null | awk '/inet /{print $2; exit}')  <- ssh here"
+else
+	echo "$DP_PORT does not exist after reload"
+fi
+echo "=== autostart done; front ports live (giu_rx=$(sysctl -n dev.agnic.0.npu_giu_rx 2>/dev/null) pp2_tx=$(sysctl -n dev.agnic.0.npu_pp2_tx 2>/dev/null)) ==="
