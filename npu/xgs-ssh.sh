@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 # xgs-ssh.sh -- start sshd on the read-only FreeBSD live stick, key-only root login,
-# host keys and authorized_keys in /tmp (nothing on the stick is written).
+# host keys and authorized_keys in /tmp (nothing on the stick is written). StrictModes is
+# off because sshd otherwise rejects a key file under the world-writable /tmp (measured).
 #   fetch -o /tmp/xgs-ssh.sh http://<build-host>:8000/xgs-ssh.sh && sh /tmp/xgs-ssh.sh http://<build-host>:8000
 # The build host serves authorized_keys next to this script (see docs/NPU-BUILD.md).
 set -eu
@@ -21,6 +22,7 @@ KbdInteractiveAuthentication no
 AuthorizedKeysFile $D/authorized_keys
 PidFile $D/sshd.pid
 UseDNS no
+StrictModes no
 Subsystem sftp /usr/libexec/sftp-server
 CFG
 [ -f "$D/sshd.pid" ] && pkill -F "$D/sshd.pid" 2>/dev/null || true
