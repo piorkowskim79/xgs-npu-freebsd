@@ -1,0 +1,14 @@
+Kernel driver for the Marvell AGNIC PCIe endpoint (11ab:7080) that the CN9130
+"NPU" of a Sophos XGS desktop appliance presents to the x86 host.
+
+The front-panel ports of an XGS sit behind that NPU. This driver speaks the
+AGNIC control ABI to it, runs the single PCIe DMA trunk, and demultiplexes it
+into port1..portN network interfaces. It also creates mvmgmt0, a management
+link to the NPU's own Linux.
+
+Forwarding is host-side: there is no offload. Whether the stock Sophos NPU
+firmware forwards front-panel traffic to a non-Sophos host is model-dependent
+and documented per model in the project repository. The driver never resets
+the NPU.
+
+Derived from the BSD-2-Clause if_agnic driver of mamoru-xgs-npu.

@@ -1,0 +1,2 @@
+if_agnic_load="YES"
+if_agnic_name="/boot/modules/if_agnic.ko"

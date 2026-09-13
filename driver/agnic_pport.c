@@ -5,7 +5,8 @@
  * panel-port interfaces (SFOS's mv_pport, "Physical Port" driver). The NPU's
  * generic NIC app forwards every front-panel port's traffic up the trunk with a
  * per-port tag; this layer strips the tag+header and delivers each frame on its
- * own ifnet (port1..port9), so OPNsense sees Port1..Port8 as ordinary,
+ * own ifnet (port1..portN, N resolved at run time), so OPNsense sees the
+ * front-panel ports as ordinary,
  * individually-addressable NICs.
  *
  * WIRE FORMAT (confirmed live on hardware):
@@ -42,39 +43,39 @@
 /* Tag/header geometry. PPORT_TAG_LEN/HDR_LEN/PREFIX now live in if_agnic.h
  * (shared with the CC_PF_INIT frame-size calc in agnic_txrx.c). */
 #define	PPORT_TAG0_BASE		0x81		/* tag byte0 for Port1         */
-#define	PPORT_COUNT		9		/* Port1..Port8 + PortF1       */
 #define	PPORT_MAX_MC		32		/* shadow multicast entries    */
 
 static MALLOC_DEFINE(M_AGNIC_PP, "agnic_pport", "agnic front-panel ports");
 
 struct agnic_pport {
 	struct agnic_softc     *sc;
-	if_t			ifp[PPORT_COUNT];
-	uint8_t			mac[PPORT_COUNT][6];
-	uint64_t		rx[PPORT_COUNT];
-	uint64_t		tx_drop[PPORT_COUNT];
+	int			nports;		/* ports exposed (sc->nports)  */
+	if_t			ifp[AGNIC_MAX_PORTS];
+	uint8_t			mac[AGNIC_MAX_PORTS][6];
+	uint64_t		rx[AGNIC_MAX_PORTS];
+	uint64_t		tx_drop[AGNIC_MAX_PORTS];
 	int			port_of_ifp_valid;
 
 	/* Per-port control-plane shadow (ioctl -> NW_AGENT attr-set). */
-	uint32_t		if_flags_last[PPORT_COUNT];
-	uint8_t			mc[PPORT_COUNT][PPORT_MAX_MC][6];
-	int			nmc[PPORT_COUNT];
+	uint32_t		if_flags_last[AGNIC_MAX_PORTS];
+	uint8_t			mc[AGNIC_MAX_PORTS][PPORT_MAX_MC][6];
+	int			nmc[AGNIC_MAX_PORTS];
 
 	/* --- P4c: per-port link/media/stats, refreshed by the 1 Hz link poll. */
-	int			link_up[PPORT_COUNT];	/* carrier shadow      */
-	int			seen_up[PPORT_COUNT];	/* carrier read UP once */
-	int			mng[PPORT_COUNT];	/* 1 = NPU-manageable  */
+	int			link_up[AGNIC_MAX_PORTS];	/* carrier shadow      */
+	int			seen_up[AGNIC_MAX_PORTS];	/* carrier read UP once */
+	int			mng[AGNIC_MAX_PORTS];	/* 1 = NPU-manageable  */
 	int			info_ok;	/* ALL_COMB_PORT_INFO usable   */
 	int			info_fail;	/* consecutive bulk failures   */
 	int			info_empty;	/* consecutive all-zero replies */
-	uint32_t		media_active[PPORT_COUNT]; /* IFM_* active word */
-	struct ifmedia		media[PPORT_COUNT];
-	uint64_t		hwstats[PPORT_COUNT][NWA_PORT_CNT_MAX];
-	int			stats_valid[PPORT_COUNT];
+	uint32_t		media_active[AGNIC_MAX_PORTS]; /* IFM_* active word */
+	struct ifmedia		media[AGNIC_MAX_PORTS];
+	uint64_t		hwstats[AGNIC_MAX_PORTS][NWA_PORT_CNT_MAX];
+	int			stats_valid[AGNIC_MAX_PORTS];
 	/* Host-side software counters (authoritative for locally-dropped TX). */
-	uint64_t		rx_bytes[PPORT_COUNT];
-	uint64_t		tx_pkts[PPORT_COUNT];
-	uint64_t		tx_bytes[PPORT_COUNT];
+	uint64_t		rx_bytes[AGNIC_MAX_PORTS];
+	uint64_t		tx_pkts[AGNIC_MAX_PORTS];
+	uint64_t		tx_bytes[AGNIC_MAX_PORTS];
 	/* Link poll: mtx-bound callout kicks a sleepable task (runs the mailbox). */
 	struct mtx		link_mtx;
 	struct callout		link_poll;
@@ -107,7 +108,8 @@ pport_tag(int port)
  *       confirmed on hardware: cabled port up, uncabled port down in the logs).
  */
 static int agnic_link_gate = 1;
-TUNABLE_INT("hw.agnic.link_gate", &agnic_link_gate);
+SYSCTL_INT(_hw_agnic, OID_AUTO, link_gate, CTLFLAG_RDTUN, &agnic_link_gate, 0,
+    "carrier policy: 0=never demote, 1=demote only after seen UP, 2=trust NPU");
 
 /*
  * Consecutive NW_AGENT GET failures for one attribute on one port before the
@@ -128,13 +130,13 @@ static void	agnic_pport_link_poll(void *xpp);
 static void	agnic_pport_link_task(void *ctx, int pending);
 static int	agnic_pport_media_word(uint32_t mbps, int full);
 
-/* Map an ifp back to its port index (0..PPORT_COUNT-1), or -1. */
+/* Map an ifp back to its port index (0..AGNIC_MAX_PORTS-1), or -1. */
 static int
 pport_index(struct agnic_pport *pp, if_t ifp)
 {
 	int i;
 
-	for (i = 0; i < PPORT_COUNT; i++)
+	for (i = 0; i < pp->nports; i++)
 		if (pp->ifp[i] == ifp)
 			return (i);
 	return (-1);
@@ -152,8 +154,10 @@ agnic_pport_bringup(struct agnic_softc *sc)
 
 	pp = malloc(sizeof(*pp), M_AGNIC_PP, M_WAITOK | M_ZERO);
 	pp->sc = sc;
+	pp->nports = (sc->nports >= 1 && sc->nports <= AGNIC_MAX_PORTS) ?
+	    sc->nports : AGNIC_DEFAULT_NPORTS;
 
-	for (i = 0; i < PPORT_COUNT; i++) {
+	for (i = 0; i < pp->nports; i++) {
 		if_t ifp = if_alloc(IFT_ETHER);
 
 		if (ifp == NULL) {
@@ -234,7 +238,7 @@ agnic_pport_bringup(struct agnic_softc *sc)
 	device_printf(dev,
 	    "[Phase 4b] pport demux up: port1..port%d created; front-panel "
 	    "traffic demuxed by tag; link/media/stats poll @1Hz "
-	    "(hw.agnic.link_gate=%d)\n", PPORT_COUNT, agnic_link_gate);
+	    "(hw.agnic.link_gate=%d)\n", pp->nports, agnic_link_gate);
 	return (0);
 }
 
@@ -266,7 +270,7 @@ agnic_pport_rx(struct agnic_softc *sc, struct mbuf *m)
 	}
 	d = mtod(m, uint8_t *);
 	port = (int)d[0] - PPORT_TAG0_BASE;
-	if (port < 0 || port >= PPORT_COUNT || pp->ifp[port] == NULL) {
+	if (port < 0 || port >= pp->nports || pp->ifp[port] == NULL) {
 		m_freem(m);
 		return;
 	}
@@ -539,11 +543,11 @@ agnic_pport_link_task(void *ctx, int pending)
 	 * runs one link_task at a time (never re-entrant), so this is race-free
 	 * and keeps ~2.5 KB off the kernel stack.
 	 */
-	static uint16_t tags[PPORT_COUNT];
-	static uint8_t states[PPORT_COUNT];
-	static uint32_t speeds[PPORT_COUNT];
-	static uint64_t stats[PPORT_COUNT][NWA_PORT_CNT_MAX];
-	static int idx[PPORT_COUNT];
+	static uint16_t tags[AGNIC_MAX_PORTS];
+	static uint8_t states[AGNIC_MAX_PORTS];
+	static uint32_t speeds[AGNIC_MAX_PORTS];
+	static uint64_t stats[AGNIC_MAX_PORTS][NWA_PORT_CNT_MAX];
+	static int idx[AGNIC_MAX_PORTS];
 	int n, i, j, port, up, any, hasstats;
 
 	(void)pending;
@@ -552,7 +556,7 @@ agnic_pport_link_task(void *ctx, int pending)
 
 	/* Build the manageable-port tag list (one bulk query covers them all). */
 	n = 0;
-	for (port = 0; port < PPORT_COUNT; port++) {
+	for (port = 0; port < pp->nports; port++) {
 		if (pp->ifp[port] != NULL && pp->mng[port]) {
 			tags[n] = pport_tag(port);
 			idx[n] = port;
@@ -798,7 +802,7 @@ agnic_pport_teardown(struct agnic_softc *sc)
 	}
 
 	sc->pport = NULL;		/* stop the RX path from using it */
-	for (i = 0; i < PPORT_COUNT; i++) {
+	for (i = 0; i < pp->nports; i++) {
 		if (pp->ifp[i] != NULL) {
 			ether_ifdetach(pp->ifp[i]);
 			ifmedia_removeall(&pp->media[i]);

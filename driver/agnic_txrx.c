@@ -80,11 +80,23 @@
  */
 #define	AGNIC_ENABLE_RETRIES	20
 
+/* Poll-until-empty bound: consecutive full-ring passes before yielding. */
+#define	AGNIC_RX_MAX_PASSES	64
+
 static void	agnic_rx_poll(void *xsc);
 static void	agnic_rx_task(void *ctx, int pending);
-static void	agnic_rx_service(struct agnic_softc *sc);
-static void	agnic_bp_refill_locked(struct agnic_softc *sc, uint32_t n);
+static int	agnic_rx_service(struct agnic_softc *sc);
+static void	agnic_bp_refill_locked(struct agnic_softc *sc);
 static void	agnic_txrx_free_rings(struct agnic_softc *sc);
+
+/* RX poll cadence in ticks from hw.agnic.rx_poll_ms (never below one tick). */
+static __inline int
+agnic_rx_poll_ticks(void)
+{
+	int t = (int)(((int64_t)agnic_tun_rx_poll_ms * hz) / 1000);
+
+	return (t < 1 ? 1 : t);
+}
 
 /* ------------------------------------------------------------------------- */
 /* Ring + buffer-pool allocation.                                            */
@@ -414,7 +426,8 @@ agnic_txrx_config_queues(struct agnic_softc *sc)
 	 * AGNIC_RX_DBELL_ID (1) -- exactly the id agnic_dbell_intr already kicks the
 	 * RX taskqueue for. The 1 Hz poll callout stays as a safety-net fallback.
 	 */
-	qc.msix_id = AGNIC_RX_DBELL_ID;
+	/* 0 = no interrupt: never point the device at a vector we did not arm. */
+	qc.msix_id = (sc->dbell_nvec > AGNIC_RX_DBELL_ID) ? AGNIC_RX_DBELL_ID : 0;
 	qc.tc = 0;
 	qc.q_buf_size = sc->bp_ring.buf_size;
 
@@ -640,7 +653,7 @@ agnic_txrx_bringup(struct agnic_softc *sc)
 	device_printf(dev,
 	    "[Phase 3b] GIU trunk datapath ready (internal, MAC "
 	    "%02x:%02x:%02x:%02x:%02x:%02x); auto-starting -- OS sees only "
-	    "port1..port9\n", sc->mac[0], sc->mac[1], sc->mac[2], sc->mac[3],
+	    "port1..portN\n", sc->mac[0], sc->mac[1], sc->mac[2], sc->mac[3],
 	    sc->mac[4], sc->mac[5]);
 	return (0);
 
@@ -712,7 +725,7 @@ agnic_txrx_dbell_kick(struct agnic_softc *sc)
 		return;
 	sc->rx_dbell_count++;
 	if (sc->if_running)
-		agnic_rx_service(sc);
+		(void)agnic_rx_service(sc);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -763,7 +776,7 @@ agnic_datapath_start(struct agnic_softc *sc)
 			device_printf(dev, "P3b: CC_PF_ENABLE still failing after "
 			    "%d tries; interface stays down, bringing up mvmgmt0 "
 			    "anyway so the NPU is reachable\n", AGNIC_ENABLE_RETRIES);
-			if (sc->pcinet == NULL)
+			if (agnic_tun_mvmgmt && sc->pcinet == NULL)
 				(void)agnic_pcinet_bringup(sc);
 			return;
 		}
@@ -790,19 +803,6 @@ agnic_datapath_start(struct agnic_softc *sc)
 			    "[Phase 3b] CC_PF_LINK_STATUS query unsupported/failed "
 			    "(err/st 0x%02x)\n", lst);
 	}
-
-	/*
-	 * Start RX servicing under rx_mtx (the callout's lock): the 1 Hz poll
-	 * callout is the reliable path; the RX doorbell task is a fast-path bonus.
-	 */
-	mtx_lock(&sc->rx_mtx);
-	sc->if_running = 1;
-	callout_reset(&sc->rx_poll, hz, agnic_rx_poll, sc);
-	mtx_unlock(&sc->rx_mtx);
-
-	device_printf(dev,
-	    "[Phase 3b] port ENABLEd; RX poll @1Hz + MSI-X dbell id %d\n",
-	    AGNIC_RX_DBELL_ID);
 
 	/*
 	 * P4b: put the trunk PF in promiscuous mode. Front-panel frames are
@@ -833,7 +833,10 @@ agnic_datapath_start(struct agnic_softc *sc)
 	 * after "AGNIC Link is Up"), so this must run here, not in the config
 	 * hook. Non-fatal; runs once.
 	 */
-	if (!sc->nwa_ready)
+	if (!agnic_tun_nwa)
+		device_printf(dev, "P4a: NW_AGENT disabled (hw.agnic.nwa=0); ports "
+		    "come from the model table, carrier is forced UP\n");
+	else if (!sc->nwa_ready)
 		(void)agnic_nwa_bringup(sc);
 
 	/*
@@ -841,16 +844,34 @@ agnic_datapath_start(struct agnic_softc *sc)
 	 * channel over which we SSH the NPU the `host_breakout_complete`
 	 * handshake that makes it start forwarding front-panel ports. Non-fatal.
 	 */
-	if (sc->pcinet == NULL)
+	if (agnic_tun_mvmgmt && sc->pcinet == NULL)
 		(void)agnic_pcinet_bringup(sc);
 
 	/*
-	 * P4b: bring up the per-front-panel-port demux (port1..port9). Once the
+	 * P4b: bring up the per-front-panel-port demux (port1..portN). Once the
 	 * NPU forwards front-panel traffic up the trunk (tagged), this splits it
 	 * into individually-addressable ifnets. Non-fatal.
 	 */
-	if (sc->pport == NULL)
+	if (sc->pport == NULL) {
+		(void)agnic_resolve_nports(sc);
 		(void)agnic_pport_bringup(sc);
+	}
+
+	/*
+	 * Only now mark the datapath live and start RX servicing, so the reaper
+	 * never delivers into a port ifnet that does not exist yet (Linux order).
+	 * Frames that arrived meanwhile sit in the RX ring and drain on the first
+	 * pass. The poll callout is the safety net; the MSI-X doorbell (if the
+	 * NPU raises it) is the fast path.
+	 */
+	mtx_lock(&sc->rx_mtx);
+	sc->if_running = 1;
+	callout_reset(&sc->rx_poll, agnic_rx_poll_ticks(), agnic_rx_poll, sc);
+	mtx_unlock(&sc->rx_mtx);
+	device_printf(dev,
+	    "[Phase 3b] datapath live: RX poll every %d ms + MSI-X dbell id %d; "
+	    "port1..port%d exposed\n", agnic_tun_rx_poll_ms, AGNIC_RX_DBELL_ID,
+	    sc->nports);
 }
 
 /* Stop RX + DISABLE the port (fire-and-forget). Safe to call repeatedly. */
@@ -886,8 +907,14 @@ agnic_stop(struct agnic_softc *sc)
 	 * if we were actually running so a spurious down does not disturb a
 	 * never-enabled device.
 	 */
-	if (was_running)
+	if (was_running) {
 		agnic_mgmt_cmd_noresp(sc, AGNIC_CC_PF_DISABLE, NULL, 0);
+		/*
+		 * A still-forwarding NPU can have frames in flight into our bpool
+		 * clusters; let that tail land before the caller frees them.
+		 */
+		pause("agdis", hz / 10);
+	}
 }
 
 /*
@@ -1034,40 +1061,52 @@ agnic_rx_poll(void *xsc)
 		return;
 	if (sc->rx_tq != NULL)
 		taskqueue_enqueue(sc->rx_tq, &sc->rx_task);
-	callout_reset(&sc->rx_poll, hz, agnic_rx_poll, sc);
-}
-
-static void
-agnic_rx_task(void *ctx, int pending)
-{
-
-	(void)pending;
-	agnic_rx_service((struct agnic_softc *)ctx);
+	callout_reset(&sc->rx_poll, agnic_rx_poll_ticks(), agnic_rx_poll, sc);
 }
 
 /*
- * Refill up to n bpool slots with fresh clusters at the advancing producer,
- * then publish the new bpool producer index. Called with rx_mtx held. Under the
- * single-queue lockstep the freed slots line up with prod_shadow; stop early if
- * a slot is unexpectedly occupied or an allocation fails (device just runs with
- * fewer buffers until the next pass).
+ * Poll-until-empty: a pass that reaped a full ring's worth of completions has
+ * probably left more behind, so go again at once instead of waiting for the
+ * next tick (which would cap RX at ring_depth / rx_poll_ms). Bounded.
  */
 static void
-agnic_bp_refill_locked(struct agnic_softc *sc, uint32_t n)
+agnic_rx_task(void *ctx, int pending)
+{
+	struct agnic_softc *sc = ctx;
+	int passes = 0;
+
+	(void)pending;
+	while (agnic_rx_service(sc) && ++passes < AGNIC_RX_MAX_PASSES)
+		;
+}
+
+/*
+ * Top the bpool up toward FULL: re-post a fresh cluster at every reclaimed
+ * slot from prod_shadow up to one behind the device's consumer index, stopping
+ * at the first slot the device still owns (rb->m != NULL) or the first
+ * allocation failure. Driving toward full -- rather than replacing only the n
+ * buffers consumed this pass -- makes a transient m_getcl()/busdma failure
+ * self-healing: the shortfall is made up on a later pass instead of shrinking
+ * the pool for good (a device with no free buffers posts no completions, so an
+ * n-gated refill would never run again). Mirrors the traffic-proven Linux
+ * agnic_bp_refill(). Called with rx_mtx held.
+ */
+static void
+agnic_bp_refill_locked(struct agnic_softc *sc)
 {
 	struct agnic_data_ring *bp = &sc->bp_ring;
 	struct agnic_bpool_desc *ring = (struct agnic_bpool_desc *)bp->mem.vaddr;
-	uint32_t posted = 0;
-	uint32_t i;
+	uint32_t cons, posted = 0;
 
-	for (i = 0; i < n; i++) {
+	cons = AGNIC_RD4(sc, AGNIC_BAR0, bp->cons_bar_off) & (bp->count - 1);
+	while (AGNIC_RING_INC(bp->prod_shadow, bp->count) != cons) {
 		uint32_t pos = bp->prod_shadow;
 		struct agnic_rxbuf *rb = &bp->rxb[pos];
 		bus_dma_segment_t seg;
 		struct mbuf *m;
 		int nsegs, error;
 
-		if (rb->m != NULL)		/* ring full: nothing to reclaim */
+		if (rb->m != NULL)		/* still device-owned: stop here */
 			break;
 		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 		if (m == NULL)
@@ -1106,7 +1145,7 @@ agnic_bp_refill_locked(struct agnic_softc *sc, uint32_t n)
  * task (enqueued by both the poll callout and the MSI-X doorbell); the single
  * task thread + rx_mtx keep it serialized.
  */
-static void
+static int
 agnic_rx_service(struct agnic_softc *sc)
 {
 	struct agnic_data_ring *rx = &sc->rx_ring;
@@ -1120,11 +1159,12 @@ agnic_rx_service(struct agnic_softc *sc)
 	uint8_t big_hdr[80];
 	uint16_t big_len = 0;
 	int have_big = 0, big_cap = 0;
+	int more;
 
 	mtx_lock(&sc->rx_mtx);
 	if (!sc->if_running) {
 		mtx_unlock(&sc->rx_mtx);
-		return;
+		return (0);
 	}
 	ring = (struct agnic_rx_desc *)rx->mem.vaddr;
 
@@ -1155,7 +1195,8 @@ agnic_rx_service(struct agnic_softc *sc)
 		}
 		rb = &bp->rxb[(uint32_t)cookie];
 		m = rb->m;
-		if (m == NULL || len == 0 || len > bp->buf_size) {
+		if (m == NULL || len == 0 || len > bp->buf_size ||
+		    (uint32_t)sc->host_headroom + d->pkt_offset + len > bp->buf_size) {
 			sc->rx_dropped++;
 			if (m != NULL) {
 				bus_dmamap_sync(bp->buf_tag, rb->map,
@@ -1207,13 +1248,15 @@ agnic_rx_service(struct agnic_softc *sc)
 	}
 
 	if (n > 0) {
-		/* Publish the RX consumer index; then hand freed slots back. */
+		/* Publish the RX consumer index first, then hand slots back. */
 		atomic_thread_fence_rel();
 		AGNIC_WR4(sc, AGNIC_BAR0, rx->cons_bar_off, rx->cons_shadow);
 		bus_barrier(sc->bar[AGNIC_BAR0], 0, sc->bar_size[AGNIC_BAR0],
 		    BUS_SPACE_BARRIER_WRITE);
-		agnic_bp_refill_locked(sc, n);
 	}
+	/* Self-healing bpool top-up on EVERY pass, even when n == 0. */
+	agnic_bp_refill_locked(sc);
+	more = (guard >= rx->count);	/* hit the cap: the ring may hold more */
 
 	{
 		uint64_t total = sc->rx_frames;
@@ -1255,4 +1298,5 @@ agnic_rx_service(struct agnic_softc *sc)
 			    "%ju dropped)\n", (uintmax_t)total, n,
 			    (uintmax_t)sc->rx_dropped);
 	}
+	return (more);
 }

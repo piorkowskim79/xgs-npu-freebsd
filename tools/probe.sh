@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: MIT
 # probe.sh — RUN THIS FIRST, on the target XGS, before building anything.
 #
-# Every proof point for this kit is on a Sophos XGS 116. Your board is a 136
-# ("same hardware mostly"). This confirms the one thing that must be true for the
-# host driver to be a near-drop-in: the Marvell AGNIC endpoint enumerates with
-# the expected PCI id and BAR sizes. If it does, proceed. If it differs, the 136
-# delta is the first thing to characterize (see docs/HARDWARE.md).
+# Every proof point upstream (mamoru-xgs-npu) is on a Sophos XGS 116. This
+# repository targets the XGS 126. The script confirms the one thing that must be
+# true for the host driver to be a near-drop-in: the Marvell AGNIC endpoint
+# enumerates with the expected PCI id and BAR sizes. If it does, proceed. If it
+# differs, the endpoint delta is the first thing to characterize (docs/XGS126.md).
 #
 # Works on Linux (IPFire) and FreeBSD (pfSense). Run as root.
 

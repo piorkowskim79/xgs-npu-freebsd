@@ -671,6 +671,8 @@ agnic_nwa_bringup(struct agnic_softc *sc)
 			p->max_mtu = max_mtu ? max_mtu : ETHERMTU;
 			p->portnum = portnum;
 			p->mng = 1;
+			if (portnum > sc->nwa_maxportnum)
+				sc->nwa_maxportnum = portnum;
 		}
 
 		if (!is_mng)

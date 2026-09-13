@@ -1,0 +1,14 @@
+Loads the if_agnic kernel driver at boot so the front-panel ports of a Sophos
+XGS desktop appliance (XGS 116/126/136 family, Marvell CN9130 NPU, PCI
+11ab:7080) appear as port1..portN and can be assigned like any other NIC.
+
+Also creates mvmgmt0, the PCIe management link to the NPU. Leave it
+unassigned unless you need to reach the NPU; set hw.agnic.mvmgmt=0 in a
+loader tunable to suppress it.
+
+Requires a reboot to activate. Every frame is forwarded by the host; there is
+no hardware offload. Per-model support status is documented in the project
+repository; the XGS 116 is the upstream reference, the XGS 126 is this
+plugin's target.
+
+WWW: https://github.com/piorkowskim79/xgs-npu-freebsd

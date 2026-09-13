@@ -42,6 +42,8 @@
 #include <sys/mutex.h>
 #include <sys/sx.h>
 #include <sys/callout.h>
+#include <sys/sysctl.h>
+#include <sys/libkern.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -54,6 +56,33 @@
 #define	AGNIC_VENDOR_MARVELL	0x11ab
 #define	AGNIC_DEV_PF		0x7080
 #define	AGNIC_DEV_VF		0x7081
+
+/*
+ * Loader tunables (hw.agnic.*), read once at attach. They let a model this
+ * driver has never run on (the XGS 126 is the first after the upstream XGS 116)
+ * be brought up in stages -- control plane, then mgmt rings, then datapath --
+ * and let the operator pin the port count when discovery cannot.
+ */
+SYSCTL_NODE(_hw, OID_AUTO, agnic, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Marvell AGNIC (Sophos XGS NPU) driver");
+int agnic_tun_mgmt = 1;
+SYSCTL_INT(_hw_agnic, OID_AUTO, mgmt, CTLFLAG_RDTUN, &agnic_tun_mgmt, 0,
+    "bring up the mgmt cmd/notif rings (P3a); 0 = stop after the CTRL handshake");
+int agnic_tun_datapath = 1;
+SYSCTL_INT(_hw_agnic, OID_AUTO, datapath, CTLFLAG_RDTUN, &agnic_tun_datapath, 0,
+    "bring up and auto-start the GIU datapath + port1..portN (P3b-P4); 0 = mgmt only");
+int agnic_tun_mvmgmt = 1;
+SYSCTL_INT(_hw_agnic, OID_AUTO, mvmgmt, CTLFLAG_RDTUN, &agnic_tun_mvmgmt, 0,
+    "create mvmgmt0, the PCIe management link to the NPU (P5)");
+int agnic_tun_nwa = 1;
+SYSCTL_INT(_hw_agnic, OID_AUTO, nwa, CTLFLAG_RDTUN, &agnic_tun_nwa, 0,
+    "drive the NW_AGENT mailbox: port discovery, admin-up, link poll (stock NPU firmware)");
+int agnic_tun_nports = 0;
+SYSCTL_INT(_hw_agnic, OID_AUTO, nports, CTLFLAG_RDTUN, &agnic_tun_nports, 0,
+    "front-panel ports to expose; 0 = auto (NW_AGENT discovery, else SMBIOS model, else 9)");
+int agnic_tun_rx_poll_ms = 10;
+SYSCTL_INT(_hw_agnic, OID_AUTO, rx_poll_ms, CTLFLAG_RDTUN, &agnic_tun_rx_poll_ms, 0,
+    "RX ring poll interval in ms (safety net; the MSI-X doorbell is the fast path)");
 
 /* AGNIC_DMA_LOWADDR (36-bit ceiling) is defined in if_agnic.h (shared w/ P3a). */
 
@@ -68,7 +97,7 @@ static const struct agnic_pci_id {
 	uint16_t	device;
 	const char     *desc;
 } agnic_ids[] = {
-	{ AGNIC_VENDOR_MARVELL, AGNIC_DEV_PF, "Marvell AGNIC GIU-NIC (PF)" },
+	{ AGNIC_VENDOR_MARVELL, AGNIC_DEV_PF, "Marvell AGNIC GIU-NIC (Sophos XGS NPU, PF)" },
 	{ 0, 0, NULL }
 };
 
@@ -356,7 +385,10 @@ agnic_config_hook(void *arg)
 	 *     is not ready. Idempotent: the later agnic_datapath_start() path sees
 	 *     sc->pcinet != NULL and returns early. Teardown stays in agnic_detach.
 	 */
-	(void)agnic_pcinet_bringup(sc);
+	if (agnic_tun_mvmgmt)
+		(void)agnic_pcinet_bringup(sc);
+	else
+		device_printf(dev, "P5: mvmgmt0 disabled (hw.agnic.mvmgmt=0)\n");
 
 	/* 3. Validate ctrl_map cookie. */
 	if (agnic_poll(sc, sc->ctrl_bar, sc->ctrl_off + AGNIC_CTRL_COOKIE_OFF,
@@ -414,16 +446,28 @@ agnic_config_hook(void *arg)
 	 *    the ether if_t. ENABLE + RX servicing start when the interface is
 	 *    ifconfig'd up. Also bounded and FLR-free; freed at detach.
 	 */
-	if (agnic_mgmt_bringup(sc) == 0 && agnic_txrx_bringup(sc) == 0) {
+	if (!agnic_tun_mgmt) {
+		device_printf(dev, "P3a: mgmt rings disabled (hw.agnic.mgmt=0); "
+		    "control plane only\n");
+		goto done;
+	}
+	if (agnic_mgmt_bringup(sc) != 0)
+		goto done;
+	if (!agnic_tun_datapath) {
+		device_printf(dev, "P3b: datapath disabled (hw.agnic.datapath=0); "
+		    "mgmt channel only\n");
+		goto done;
+	}
+	if (agnic_txrx_bringup(sc) == 0) {
 		/*
 		 * 11. Auto-start the datapath NOW (CC_PF_ENABLE + NW_AGENT front-
 		 *    panel ports + mvmgmt0 + pport demux), rather than waiting for
 		 *    `ifconfig <trunk> up`. The GIU trunk has no OS-visible ifnet;
-		 *    the front-panel port ifnets (port1..port9) must exist before
+		 *    the front-panel port ifnets (port1..portN) must exist before
 		 *    OPNsense's boot-time interface assignment runs, or it assigns
 		 *    the (now-hidden) trunk as LAN and can never obtain DHCP. This
 		 *    runs inside the config_intrhook, so the boot waits for it and
-		 *    port1..port9 are present by the time rc/interface-assign runs.
+		 *    port1..portN are present by the time rc/interface-assign runs.
 		 */
 		agnic_datapath_start(sc);
 	}
@@ -479,6 +523,94 @@ agnic_p2b_teardown(struct agnic_softc *sc)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Platform identity + front-panel port count.                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Front-panel port counts per model, from the Sophos datasheets. Only the
+ * XGS 116 entry is confirmed on hardware (upstream mamoru-xgs-npu). The SMBIOS
+ * strings are matched loosely -- product contains "XGS", version starts with
+ * the model number -- because the exact strings a Sophos BIOS stamps are
+ * Unverified on every model except the XG 125 Rev. 3 ("XG" / "125r3"). The
+ * platform line logged at attach is what settles it for a new box.
+ */
+static const struct agnic_model {
+	const char	*model;		/* leading digits of smbios.system.version */
+	int		 nports;
+	const char	*ports;
+} agnic_models[] = {
+	{ "116", 9,  "8x GbE copper + 1x SFP" },		/* Measured upstream    */
+	{ "126", 14, "12x GbE copper + 2x SFP" },		/* datasheet; Unverified */
+	{ "136", 14, "10x GbE + 2x 2.5GbE copper + 2x SFP" },/* datasheet; Unverified */
+	{ NULL, 0, NULL }
+};
+
+static void
+agnic_read_model(struct agnic_softc *sc)
+{
+	char *prod, *ver;
+
+	prod = kern_getenv("smbios.system.product");
+	ver = kern_getenv("smbios.system.version");
+	snprintf(sc->model, sizeof(sc->model), "%s %s",
+	    prod != NULL ? prod : "?", ver != NULL ? ver : "?");
+	if (prod != NULL)
+		freeenv(prod);
+	if (ver != NULL)
+		freeenv(ver);
+}
+
+/* Port count from the model table, or 0 when the platform is not recognised. */
+static int
+agnic_model_nports(struct agnic_softc *sc, const char **ports)
+{
+	const struct agnic_model *m;
+	const char *ver;
+
+	if (strstr(sc->model, "XGS") == NULL && strstr(sc->model, "xgs") == NULL)
+		return (0);
+	ver = strchr(sc->model, ' ');
+	if (ver == NULL)
+		return (0);
+	ver++;
+	for (m = agnic_models; m->model != NULL; m++) {
+		if (strncmp(ver, m->model, strlen(m->model)) == 0) {
+			*ports = m->ports;
+			return (m->nports);
+		}
+	}
+	return (0);
+}
+
+int
+agnic_resolve_nports(struct agnic_softc *sc)
+{
+	const char *src, *ports = "";
+	int n;
+
+	if (agnic_tun_nports > 0) {
+		n = agnic_tun_nports;
+		src = "hw.agnic.nports tunable";
+	} else if (sc->nwa_ready && sc->nwa_maxportnum > 0) {
+		n = sc->nwa_maxportnum;
+		src = "NW_AGENT discovery (highest manageable port number)";
+	} else if ((n = agnic_model_nports(sc, &ports)) > 0) {
+		src = "SMBIOS model table";
+	} else {
+		n = AGNIC_DEFAULT_NPORTS;
+		src = "built-in default (XGS 116 layout)";
+	}
+	if (n > AGNIC_MAX_PORTS)
+		n = AGNIC_MAX_PORTS;
+	if (n < 1)
+		n = 1;
+	sc->nports = n;
+	device_printf(sc->dev, "front-panel ports: %d (%s%s%s)\n", n, src,
+	    ports[0] != '\0' ? "; " : "", ports);
+	return (n);
+}
+
+/* ------------------------------------------------------------------------- */
 /* newbus methods.                                                           */
 /* ------------------------------------------------------------------------- */
 
@@ -505,6 +637,11 @@ agnic_attach(device_t dev)
 	int i, error, nvec, want;
 
 	sc->dev = dev;
+	agnic_read_model(sc);
+	device_printf(dev, "platform: %s (hw.agnic: mgmt=%d datapath=%d mvmgmt=%d "
+	    "nwa=%d nports=%d rx_poll_ms=%d)\n", sc->model, agnic_tun_mgmt,
+	    agnic_tun_datapath, agnic_tun_mvmgmt, agnic_tun_nwa, agnic_tun_nports,
+	    agnic_tun_rx_poll_ms);
 	pci_enable_busmaster(dev);
 
 	/* Map BAR0/2/4. */

@@ -146,7 +146,7 @@ pc_cfg_wr64(struct agnic_pcinet *p, uint32_t off, uint64_t v)
 }
 
 /* SPSC ring index helpers (operate on the coherent control struct). */
-static __inline int
+static __inline int __unused
 pc_q_empty(struct pc_q *q)
 {
 	return (q->push_idx == q->pop_idx);

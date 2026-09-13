@@ -21,6 +21,7 @@
 #define	_IF_AGNIC_H_
 
 #include <sys/_task.h>		/* struct task embedded in softc (P3b RX) */
+#include <sys/sysctl.h>		/* SYSCTL_DECL(_hw_agnic) for the tunables  */
 #include <sys/socket.h>
 #include <net/if.h>		/* if_t (embedded in softc, P3b)          */
 
@@ -392,7 +393,8 @@ struct agnic_data_ring {
  * state/mac/mtu/promisc/filters); internal ports are read-only (int ops) and
  * are never admin-up'd or mac-set from the host.
  */
-#define	AGNIC_MAX_PORTS		16
+#define	AGNIC_MAX_PORTS		32	/* tag byte0 0x81..0xA0            */
+#define	AGNIC_DEFAULT_NPORTS	9	/* XGS 116 layout: 8 copper + SFP  */
 #define	PPORT_REM_PORT_NUM(t)	(((t) & 0x3F00) >> 8)	/* GPL port_tag.h  */
 
 /*
@@ -418,6 +420,10 @@ struct agnic_nwa_port {
 
 struct agnic_softc {
 	device_t		dev;
+
+	/* --- platform identity + front-panel port count (if_agnic.c) --- */
+	char			model[48];	/* "smbios.system.product version"   */
+	int			nports;		/* ports to expose as port1..portN  */
 
 	/* --- Phase 1: resource acquisition --- */
 	struct resource	       *bar[AGNIC_NBARS];
@@ -542,6 +548,7 @@ struct agnic_softc {
 	int			nwa_sx_inited;
 	struct agnic_nwa_port	nwa_ports[AGNIC_MAX_PORTS];
 	int			nwa_nports;	/* # manageable front-panel ports  */
+	uint8_t			nwa_maxportnum;	/* highest manageable port number  */
 
 	/* --- Phase 5: mvmgmt0 management link (opaque state) --- */
 	void		       *pcinet;		/* struct agnic_pcinet *          */
@@ -703,5 +710,24 @@ void	agnic_stop(struct agnic_softc *sc);
 int	agnic_giu_tx(struct agnic_softc *sc, struct mbuf *m);
 void	agnic_txrx_teardown(struct agnic_softc *sc);
 void	agnic_txrx_dbell_kick(struct agnic_softc *sc);	/* from dbell[1] ISR */
+
+/* ------------------------------------------------------------------------- */
+/* Loader tunables (hw.agnic.*, if_agnic.c) and port-count resolution.       */
+/* ------------------------------------------------------------------------- */
+
+SYSCTL_DECL(_hw_agnic);
+extern int agnic_tun_mgmt;		/* 1 = bring up the mgmt rings (P3a)          */
+extern int agnic_tun_datapath;	/* 1 = bring up + auto-start datapath (P3b+)  */
+extern int agnic_tun_mvmgmt;	/* 1 = create mvmgmt0 (P5)                    */
+extern int agnic_tun_nwa;		/* 1 = drive the NW_AGENT mailbox (P4a/P4c)   */
+extern int agnic_tun_nports;	/* 0 = auto: NW_AGENT > SMBIOS model > 9      */
+extern int agnic_tun_rx_poll_ms;	/* RX poll interval (ms); MSI-X = fast path */
+
+/*
+ * Decide how many front-panel ports to expose and record it in sc->nports:
+ * tunable > NW_AGENT discovery > SMBIOS model table > AGNIC_DEFAULT_NPORTS.
+ * Called once by agnic_datapath_start() right before the pport demux is built.
+ */
+int	agnic_resolve_nports(struct agnic_softc *sc);
 
 #endif /* _IF_AGNIC_H_ */

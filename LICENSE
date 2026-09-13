@@ -1,0 +1,18 @@
+xgs-npu-freebsd is a mixed-licence repository. Every source file carries an
+SPDX-License-Identifier; this file is the map, and the full texts are in LICENSES/.
+
+  Component                                    SPDX
+  driver/  ..................................  BSD-2-Clause
+  opnsense/, tools/, docs/, this file  ......  MIT
+
+driver/ is derived from host-driver-freebsd/ of
+https://github.com/samuelleb11/mamoru-xgs-npu (commit e4101698, 2026-09-07):
+  Copyright (c) 2026 The Mamoru Project (upstream)
+  Copyright (c) 2026 Michael Piorkowski (modifications)
+Both under BSD-2-Clause; the upstream copyright notice is preserved.
+
+tools/probe.sh is upstream's MIT script, unchanged apart from comments.
+
+NOT included and NOT ours to license: any Sophos or Marvell vendor material (the NPU
+base OS and bootloader, mv_armada_ep, the Marvell UIO modules, Sophos keys). They stay
+on your own appliance.

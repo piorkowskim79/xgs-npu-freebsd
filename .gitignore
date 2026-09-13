@@ -1,0 +1,22 @@
+# kernel module build products (bsd.kmod.mk)
+driver/*.o
+driver/*.ko
+driver/*.ko.debug
+driver/*.ko.full
+driver/.depend*
+driver/machine
+driver/x86
+driver/device_if.h
+driver/bus_if.h
+driver/pci_if.h
+driver/opt_*.h
+driver/export_syms
+driver/*_tmp.c
+
+# ports work directories
+opnsense/ports/**/work/
+opnsense/plugins/**/work/
+
+# editors / macOS
+.DS_Store
+*.swp
