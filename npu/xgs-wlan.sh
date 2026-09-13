@@ -7,7 +7,8 @@
 # It asks for SSID and passphrase; the passphrase is not echoed and stays in /tmp/wlan.
 set -eu
 DEV=${1:-rtwn0}
-ifconfig "$DEV" >/dev/null 2>&1 || { echo "no $DEV (dmesg | tail: is the adapter attached and stable?)"; exit 1; }
+# the radio is not an interface (that is wlan0, created below); it is listed by net80211
+sysctl -n net.wlan.devices 2>/dev/null | grep -qw "$DEV" || { echo "no $DEV in net.wlan.devices (dmesg | tail: is the adapter attached and stable?)"; exit 1; }
 printf 'SSID: '; read -r SSID
 printf 'Passphrase: '; stty -echo; read -r PSK; stty echo; echo
 mkdir -p /tmp/wlan; chmod 700 /tmp/wlan
