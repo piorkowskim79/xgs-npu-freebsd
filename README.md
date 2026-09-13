@@ -8,7 +8,7 @@ Target box for this repository: the **Sophos XGS 126** (12 x GbE copper, 2 x SFP
 AMD Ryzen Embedded R1000 host). Everything here is derived from
 [samuelleb11/mamoru-xgs-npu](https://github.com/samuelleb11/mamoru-xgs-npu), whose
 FreeBSD driver `if_agnic` was measured on an XGS 116 (control plane) and whose Linux
-driver carries traffic there. Nothing in this repository has run on an XGS 126 yet.
+driver carries traffic there. As of 2026-09-13 the driver has run on an XGS 126 and carries front-panel traffic in both directions as a live (RAM-only) system; see the Status table and [docs/XGS126.md](docs/XGS126.md).
 
 ## Read this first: what the hardware is
 
@@ -41,15 +41,30 @@ NPU data plane (`dp_fwd`) to carry traffic on the 116, and that replacement is
 | NW_AGENT port discovery (gives the 126 port table) | **Measured**: 16 entries, 14 usable (10 switch ports incl. 2 SFP, 4 SoC ports `eth1`–`eth4`) | [docs/XGS126.md](docs/XGS126.md) |
 | RX datapath, stock NPU firmware | **Measured: 0 frames** | Sophos `usfp` forwards nothing without its host-side tables |
 | RX datapath, `dp_fwd` on the NPU | **Measured: works** (real LAN frame decoded on `port1`, 2026-09-13) | [docs/XGS126.md](docs/XGS126.md) |
-| TX datapath to the front jacks | **not reaching the wire** with either data plane: frames leave the host, the LAN never sees the port MAC | forwarder host->front / switch-DSA path, open |
-| Host reload without reboot | **Measured**: NPU keeps the old session; stale-session handling added, unverified | [docs/CHANGES-FROM-UPSTREAM.md](docs/CHANGES-FROM-UPSTREAM.md) §9 |
-| Replacement NPU data plane (`dp_fwd`) | **Built and run**: RX works, TX egress + reload stability open | [docs/NPU-BUILD.md](docs/NPU-BUILD.md), [docs/XGS126.md](docs/XGS126.md) |
+| TX datapath to the front jacks, `dp_fwd` on the NPU | **Measured: works** — DHCP lease + 15/15 ping to a LAN host through the stock switch, 2026-09-13 | [docs/XGS126.md](docs/XGS126.md), [docs/CHANGES-FROM-UPSTREAM.md](docs/CHANGES-FROM-UPSTREAM.md) §12 |
+| Host reload against a running `dp_fwd` | **Measured OK**: RX-ring reattach fix ends the storm; `mvmgmt0` survives, clean warm handshake | [docs/CHANGES-FROM-UPSTREAM.md](docs/CHANGES-FROM-UPSTREAM.md) §11 |
+| Replacement NPU data plane (`dp_fwd`) | **Measured: RX and TX both work** through the stock switch; egress solved by DSA device 0 | [docs/NPU-BUILD.md](docs/NPU-BUILD.md), [docs/XGS126.md](docs/XGS126.md) |
+| Persistence / durable operation | **Open**: `dp_fwd` is volatile in `/tmp`; the NPU relaunches stock `usfp` when it exits, and a host reboot resets the NPU. Needs `dp_fwd` in an NPU rootfs of your own | [docs/XGS126.md](docs/XGS126.md) |
 | OPNsense port + plugin | Written, not built | see [docs/OPNSENSE.md](docs/OPNSENSE.md) |
 
-The honest summary: the host side of the driver is proven on a 126 up to and including the
-data-plane handshake; with Sophos's own NPU firmware no front-panel traffic flows in either
-direction. The next step is the replacement data plane on the NPU, which is built and staged
-but has not run yet. This is not a working port.
+The honest summary: on an XGS 126, with the replacement NPU data plane `dp_fwd` running (built
+from upstream's forwarder, tagged for switch device 0) and the FreeBSD `if_agnic` driver here, the
+front ports carry real traffic in both directions — a DHCP lease and sustained ping round-trips
+through the stock Marvell switch, 2026-09-13. With Sophos's own NPU firmware (`usfp`) no traffic
+flows, as expected. **Two constraints are load-bearing and unsolved:**
+
+1. **Live-system only, no persistence.** `dp_fwd` runs from the NPU's `/tmp` (its rootfs is
+   read-only) and the FreeBSD side boots from a RAM-only USB stick. When `dp_fwd` exits, the NPU's
+   own startup supervision relaunches the stock `usfp` stack and the front ports go quiet; a host
+   reboot resets the NPU over PCIe, so `/tmp` cannot persist across it. Durable operation needs
+   `dp_fwd` installed in an NPU rootfs of your own —
+   not done.
+2. **You must supply the Sophos NPU management key.** The kit talks to the NPU over `mvmgmt0` with
+   Sophos's public management SSH key, which is **not** shipped here. Without it there is no way to
+   stage `dp_fwd` onto the NPU.
+
+So this is a proven data path and a usable live-system testbed, **not** a turnkey or persistent
+OPNsense NIC yet. The remaining work is persistence and packaging, not the datapath.
 
 ## What changed against upstream
 
