@@ -1,18 +1,18 @@
 # XGS 126: Driver Hardening, Install Kit and Port Soak Tests — Implementation Plan (v2, council-reviewed)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Read `docs/XGS126.md` (newest sections last), `docs/NPU-BUILD.md`, `docs/CHANGES-FROM-UPSTREAM.md` and `docs/OPNSENSE.md` first; every fact below is measured there unless marked *Unverified*. Plan v1 was reviewed by a four-voice council on 2026-09-15; the verdict and the changes it caused are in the last section.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Read `docs/XGS126.md` (newest sections last), `docs/NPU-BUILD.md`, `docs/CHANGES-FROM-UPSTREAM.md` and `docs/OPNSENSE.md` first; every fact below is measured there unless marked *Unverified*. Plan v1 was reviewed by a four-voice council on 2026-09-15 (Appendix A). v2.1, same day: scope corrected by the user — v1.0 = installable driver kit, published on GitHub and contributed upstream; no OPNsense deployment on the box (Appendix B8); lab system = unattended FreeBSD 15.1 installed from the existing live stick onto a second USB stick.
 
-**Goal:** Turn the measured-working but volatile XGS 126 datapath (`if_agnic` on FreeBSD + `dp_fwd` on the NPU) into a durable, self-healing, installable network stack for OPNsense 26.7 (and plain FreeBSD 15.1), proven by load and multi-day soak tests on eight copper front ports — executed by an autonomous session with the user needed only for the physical checklist.
+**Goal:** Turn the measured-working but volatile XGS 126 datapath (`if_agnic` on FreeBSD + `dp_fwd` on the NPU) into a durable, self-healing, **installable driver kit** for FreeBSD 15.1 and OPNsense 26.7 — published as a GitHub release and contributed to the upstream forks (mamoru-xgs-npu, opnsense/ports + plugins) — proven by load and multi-day soak tests on eight copper front ports; executed by an autonomous session with the user needed only for the physical checklist. **Installing OPNsense on the user's box is explicitly not a v1.0 goal** (Appendix B8).
 
 **Architecture:** The NPU (CN9130, own Linux on eMMC) boots `dp_fwd` from its own storage (slot p2 + `/persistent/dp`, with a respawn loop) before the x86 host attaches; the host driver `if_agnic` creates the port interfaces at attach regardless of NPU state, does one clean handshake when the NPU is ready, and a userland watchdog re-attaches on the measured reload path whenever the NPU session is lost. An install kit packages both halves (host: kmod + rc script + CLI; NPU: slot installer with a self-reverting one-shot boot) and a Pi-hosted test suite exercises the ports independently of any AI session.
 
-**Tech Stack:** FreeBSD 15.1-RELEASE (GENERIC) / OPNsense 26.7 nano image, C (newbus kmod), POSIX sh, Python 3 (reports), iperf3, Raspberry Pi 5 `printscan` (Debian 13, aarch64) as build host, console host and traffic partner, MUSDK `dp_fwd` (static aarch64).
+**Tech Stack:** FreeBSD 15.1-RELEASE (GENERIC; unattended `bsdinstall script` from the existing live stick onto a second USB medium as the lab system) / OPNsense 26.7 as packaging target, C (newbus kmod), POSIX sh, Python 3 (reports), iperf3, Raspberry Pi 5 `printscan` (Debian 13, aarch64) as build host, console host and traffic partner, MUSDK `dp_fwd` (static aarch64).
 
 ---
 
 ## Kurzfassung für Mike (Deutsch)
 
-**Was der Plan liefert (v1.0):** (1) Persistentes dp_fwd auf der NPU (Slot p2) live, mit Respawn und einem selbst-zurücksetzenden Einmal-Boot als Rückweg. (2) Ein Host, der auch ohne NPU sauber bootet (Port-Interfaces existieren immer) und sich nach einem NPU-Neustart selbst neu verbindet. (3) Ein Installationskit: ein Befehl für den OPNsense-/FreeBSD-Host (Modul, Boot-Laden, Dienst, `agnicctl`), ein Befehl für die NPU (Payload, Hook, Umschalten, Prüfen, Rollback), OPNsense-Pakete. (4) Eine Testsuite auf dem Pi für die acht Kupferports: Funktion, Durchsatz, Paketrate, Latenz, 24-h- und 72-h-Dauerlauf mit Link-Flaps, Neuladungen, NPU-/Host-Neustarts und Netzstecker — wie im Firewall-Alltag. (5) Upstream-Einreichung (nur mit deinem Go).
+**Was der Plan liefert (v1.0):** einen **installierbaren Treiber**, veröffentlicht auf GitHub und eingebracht in die Forks — **keine OPNsense-Installation auf deiner Box**. Im Einzelnen: (1) Persistentes dp_fwd auf der NPU (Slot p2) live, mit Respawn und einem selbst-zurücksetzenden Einmal-Boot als Rückweg. (2) Ein Host, der auch ohne NPU sauber bootet (Port-Interfaces existieren immer) und sich nach einem NPU-Neustart selbst neu verbindet. (3) Das Installationskit: ein Befehl für einen FreeBSD- oder OPNsense-Host (Modul, Boot-Laden, Dienst, `agnicctl`), ein Befehl für die NPU (Payload, Hook, Umschalten, Prüfen, Rollback), dazu das OPNsense-Port/Plugin-Paar und ein GitHub-Release mit vorgebautem Modul. Getestet wird das Kit auf einem **unbeaufsichtigt installierten FreeBSD 15.1** (der vorhandene Live-Stick ist die Installationsquelle, ein zweiter Stick das Ziel; kein Curses). (4) Eine Testsuite auf dem Pi für die acht Kupferports: Funktion, Durchsatz, Paketrate, Latenz, 24-h- und 72-h-Dauerlauf mit Link-Flaps, Neuladungen, NPU-/Host-Neustarts und Netzstecker — wie im Firewall-Alltag. (5) Upstream-Einreichung (nur mit deinem Go).
 
 **Was in v1.1 verschoben wurde (Council):** eindeutige MACs pro Gerät, Jumbo-Frames, die vier SoC-Ports (eth1–eth4), Performance-Tuning, Weiterleitungstest über zwei Segmente, Kernel-interner Watchdog, händische FreeBSD-Installation.
 
@@ -26,7 +26,7 @@
 
 - [ ] **USB-Ethernet-Adapter** (RTL8153 = `ure0` oder AX88179 = `axge0`) in den **vorderen** USB-Port der XGS, Kabel ins Heim-LAN. Der Adapter bekommt die **feste Adresse 192.168.2.250** (außerhalb des FritzBox-DHCP-Bereichs; falls dein Pool bis .250 reicht, im Plan `XGS_IP` anpassen).
 - [ ] **FTDI-Konsolenkabel** (bisher am Mac, `cu.usbserial-D30A5FY8`) **an den Pi `printscan`** umstecken. Die Konsole läuft dann als Dienst auf dem Pi und überlebt XGS-Neustarts.
-- [ ] **USB-SSD oder USB-Stick ≥ 16 GB** in den **hinteren** USB-3-Port der XGS: Zieldatenträger für OPNsense (das Image schreibt die Sitzung selbst vom Live-Stick aus; kein Curses-Installer).
+- [ ] **Ein zweiter USB-Stick ≥ 16 GB (oder eine USB-SSD)** in den **hinteren** USB-3-Port der XGS. Warum ein zweiter: der vorhandene FreeBSD-Stick ist ein Live-System (Root read-only, alles nach Neustart weg) und dient als Installationsquelle und Rettungssystem; der Installations-Test braucht ein beschreibbares FreeBSD, das Reboots überlebt. Die Sitzung installiert es selbst, unbeaufsichtigt, vom Live-Stick aus.
 - [ ] **Port1–Port8** der XGS an **einen** Switch, der ans Heim-LAN hängt; **Pi `printscan`** an denselben Switch (ein Kabel).
 - [ ] Optional: eine **schaltbare Steckdose** (Smart Plug) für die XGS, damit Netzstecker-Zyklen automatisiert werden können. Ohne: du ziehst zweimal selbst (Gate 1, Stunde 36 des 72-h-Laufs); der Plan sagt dir wann.
 - [ ] XGS **einschalten** (Live-Stick steckt, bootet p3/Stock).
@@ -57,9 +57,9 @@ Order: 0 → 1 → 2.0 → 2.1 → 2.2 → 3.1 → 3.2 → 3.3 → 4.1 → 4.2 �
 | 0 Access | fixed-IP USB-NIC SSH, Pi console service, `npucon.sh`, state snapshot | `ssh xgs uptime` and `ssh printscan "xgscon uptime"` both work across an XGS reboot |
 | 1 Persistence | NPU boots `dp_fwd` from p2 with respawn; self-reverting one-shot flip; host binds it | 3 warm reboots + **1 mains cycle** → port1 lease ≤ 5 min each; `pkill dp_fwd` → new pid ≤ 10 s |
 | 2 Robustness | measured NPU-reboot behaviour; ifnets exist without NPU; userland watchdog re-attach; mvmgmt0 fix | NPU reboot → lease back ≤ 3 min, no manual step; 20 reloads clean; 10× 30 MB over mvmgmt0 |
-| 3 Kit | `install.sh`, rc.d `agnic_npu` (non-blocking), `agnicctl`, `npu-install.sh` with one-shot flip, OPNsense nano bring-up, negative test | OPNsense nano on USB SSD + kit → reboot → GUI over port1; with NPU dead → still boots to SSH/GUI, no console prompt |
+| 3 Kit | `install.sh`, rc.d `agnic_npu` (non-blocking), `agnicctl`, `npu-install.sh` with one-shot flip, unattended FreeBSD 15.1 lab install, negative test, OPNsense port+plugin packages, release tarball | FreeBSD 15.1 on the second stick + kit → reboot → 8 ports up, lease on port1; with NPU dead → still boots to SSH, no console prompt; kmod port + plugin packages build |
 | 4 Tests | Pi-hosted suites: functional, perf matrix, 24 h + 72 h soak with events incl. mains cut | 72 h: 0 wedges, events recovered ≤ 3 min, no leak, counters consistent |
-| 5 Upstream | PR texts, README/CHANGELOG, `v1.0.0` (local tag) | ready for the user's go |
+| 5 Publish | GitHub release `v1.0.0` (module + kit + checksums), PRs to mamoru-xgs-npu and opnsense/ports+plugins | texts and assets ready; the user gives one go for release + PRs |
 
 **Fail** = stop, record in `docs/XGS126.md`, apply the task's rollback, continue with the next independent task or return with a new hypothesis (one at a time).
 
@@ -272,13 +272,36 @@ Council decision: **no in-kernel reattach in v1.0** (Appendix B1). Two small cha
 - [ ] **Step 2: `kit/host/agnicctl`**: `status|counters|reattach|watch-log|npu-shell|npu-state|npu-log`.
 - [ ] **Step 3:** Test on the live stick (copy to `/usr/local/etc/rc.d/`, `/usr/local/sbin/`): `service agnic_npu start` → `datapath up` in the log; `agnicctl counters`. Commit.
 
-### Task 3.2: OPNsense 26.7 nano on the USB SSD, written by the live-stick host — no curses installer
+### Task 3.2: Unattended FreeBSD 15.1 lab install on the second USB stick (no curses), kit install, negative test
 
-- [ ] **Step 1:** From the live stick over the USB NIC: `fetch https://mirror.opnsense.org/releases/26.7/OPNsense-26.7-nano-amd64.img.bz2` (serial-console nano image; if only a `serial`/`vga` split exists in 26.7, take `nano` — nano images talk to the serial console) into `/tmp`; verify the published sha256 (`fetch …img.bz2.sig`/`SHA256` file); identify the target: `camcontrol devlist; geom disk list` → the rear USB SSD is the device that is **not** `da0` (the stick) and has no `EFISYS` — refuse if unsure (`diskinfo -v`, size, `gpart show`); `bzcat /tmp/OPNsense-26.7-nano-amd64.img.bz2 | dd of=/dev/daN bs=1m conv=sync`; `gpart show daN` shows the OPNsense layout.
-- [ ] **Step 2:** Add the kit to the new disk **before first boot**: `mount /dev/daNp3 /mnt` (the UFS root; confirm with `gpart show`), copy `build/if_agnic.ko` → `/mnt/boot/modules/`, write `/mnt/boot/loader.conf.local` (`if_agnic_load="YES"`, `if_agnic_name="/boot/modules/if_agnic.ko"`, `console="comconsole"`, `comconsole_speed="115200"`), install `kit/host/rc.d/*` + `agnicctl` + conf, `/mnt/etc/gettytab`+`ttys` autologin (lab), `/mnt/root/.ssh/authorized_keys` (Mac + Pi keys), and an OPNsense `config.xml` seed under `/mnt/conf/config.xml` from `kit/host/opnsense/config-seed.xml` with `port1` = LAN (DHCP client), `ure0`/`axge0` = OPT1 static 192.168.2.250 with SSH enabled, root password hash from `kit/host/opnsense/README` (a throwaway lab password, documented). `umount /mnt`.
-- [ ] **Step 3:** Reboot the host into the SSD (BIOS boot order: the executing session sets the one-time boot via `efibootmgr`-equivalent on FreeBSD `efibootmgr -n` if UEFI, else asks the user once to select the SSD in the BIOS boot menu — this is the only possible manual step; try `efibootmgr` first). Watch `xgscon`. **Pass:** OPNsense boots to the console menu, `ssh root@192.168.2.250` works, GUI `https://<port1-lease>` reachable from the Pi (`curl -k -I`), `Interfaces > Assignments` (via `configctl interface list ifconfig` or the GUI) lists `port1..port14`, `mvmgmt0`.
-- [ ] **Step 4: Negative test (dead NPU):** `ssh root@192.168.2.250 'ssh ... root@NPU "fw_setenv bootcmd \"$(fw_printenv -n bootcmd_emmc3)\"; fw_setenv bootargs \"$(fw_printenv -n bootargs_emmc3)\""'` (stock p3 = no dp_fwd) and reboot: OPNsense must still boot to SSH/GUI with **no** console prompt, ports `no carrier`, `agnic_watch` logging attempts; then flip back to p2 (Task 1.3 Step 1 commands) and reboot → ports back. Restore the stick as the boot device afterwards only if the next tasks need it (they do not; the SSD is now the lab system).
-- [ ] **Step 5:** `docs/INSTALL.md` (new): the nano path (autonomous) and the plain-FreeBSD path (v1.1, manual). Commit; local tag `v0.3.0-rc1`.
+The live stick *is* the 15.1 memstick, so `bsdinstall script` installs unattended from it, offline (sets in `/usr/freebsd-dist`).
+
+- [ ] **Step 1: Target disk.** `ssh xgs 'camcontrol devlist; geom disk list | grep -E "Name|Mediasize"'` → the rear medium is the `daN` that is **not** the live stick (`da0`, carries `EFISYS`) — refuse if ambiguous.
+- [ ] **Step 2: `kit/lab/installerconfig`** (FreeBSD unattended install file; `kit/lab/lab-install.sh` substitutes `daN` and the two SSH keys and runs `bsdinstall script /tmp/installerconfig` on the stick host):
+
+```sh
+PARTITIONS=daN
+DISTRIBUTIONS="kernel.txz base.txz src.txz"
+#!/bin/sh
+sysrc hostname=xgs126-lab sshd_enable=YES ntpd_enable=YES
+sysrc ifconfig_ure0="inet 192.168.2.250/24" ifconfig_axge0="inet 192.168.2.250/24" defaultrouter=192.168.2.1
+echo 'nameserver 192.168.2.1' > /etc/resolv.conf
+printf 'console="comconsole"\ncomconsole_speed="115200"\nautoboot_delay="5"\n' >> /boot/loader.conf
+mkdir -p /root/.ssh && cat > /root/.ssh/authorized_keys <<EOF
+@@MAC_KEY@@
+@@PI_KEY@@
+EOF
+chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys
+sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+printf 'xgs:al=root:tc=3wire.115200:\n' >> /etc/gettytab
+sed -i '' 's|^ttyu0.*|ttyu0 "/usr/libexec/getty xgs" vt100 onifconsole secure|' /etc/ttys
+```
+
+Expected: ~10 min, ends with `Installation complete`.
+- [ ] **Step 3: First boot of the new stick.** `ssh xgs reboot`; if the BIOS boots the live stick again, set the one-time boot with `efibootmgr -n` from the live stick first; if unsupported, ask the user once to pick the second stick in the BIOS boot menu (the only possible manual step). **Pass:** `ssh root@192.168.2.250 'uname -a; mount | grep " / "'` shows 15.1-RELEASE on `daNp2`; `xgscon 'id'` = root.
+- [ ] **Step 4: Kit install on the lab system.** `git clone` the repo (USB NIC has internet), `make -C driver` (`/usr/src` installed), `sh kit/host/install.sh --npu-key build/mvmgt.x86` → `/boot/modules/if_agnic.ko`, `/boot/loader.conf.d/agnic.conf`, rc.d `agnic_npu` + `agnic_watch`, `agnicctl`; reboot. **Pass:** `agnicctl status` up, 8 ports `active`, `dhclient port1` lease, no manual step.
+- [ ] **Step 5: Negative test (dead NPU).** Flip the NPU to p3 (stock, no dp_fwd) with the Task 1.3 rollback command and reboot: the host must boot to SSH with **no** console prompt, `port1..port14` present with `no carrier`, `agnic_watch` logging attempts; flip back to p2, reboot → ports back.
+- [ ] **Step 6:** `docs/INSTALL.md` (new): FreeBSD path (tested), OPNsense path (same `install.sh` or the packages of Task 3.4; box-level test deferred, Appendix B8). Commit; local tag `v0.3.0-rc1`.
 
 ### Task 3.3: NPU installer with self-reverting one-shot, verify, rollback
 
@@ -290,12 +313,13 @@ Council decision: **no in-kernel reattach in v1.0** (Appendix B1). Two small cha
 - [ ] **Step 4: `npu-rollback.sh`**: restores `bootcmd`/`bootargs` from `uboot-env-before-flip.txt` (env flip only; never touches slot contents) and reboots via host reboot. The one-shot design means an unverified flip reverts on its own at the next power cycle.
 - [ ] **Step 5: Test on the lab box (currently p2 permanent):** `npu-rollback.sh` → p3 stock → `npu-install.sh --flip` (standby = p2 again; re-installs idempotently) → reboot → `npu-verify.sh --lease port1 --make-permanent` → p2 permanent. Twice. Never writes p3. Commit; local tag `v0.3.0`.
 
-### Task 3.4: OPNsense packages (after Phase 4; nice-to-have for v1.0)
+### Task 3.4: OPNsense port + plugin packages, built on the FreeBSD lab system
 
-- [ ] **Step 1:** On the OPNsense nano box: `growfs` if needed, `opnsense-code src ports plugins`, copy `opnsense/ports/net/agnic-kmod` and `opnsense/plugins/net/agnic`, port `DISTVERSION` = the local `v0.3.0` tag (the tag must be pushed for `USE_GITHUB` → **ask the user**; until then build from a local `DISTFILES` tarball via `MASTER_SITES=file://`), `make makesum && make package`, plugin `make package` with `rc.d/agnic_npu`, `rc.d/agnic_watch`, `agnicctl` in `pkg-plist`.
-- [ ] **Step 2:** `pkg add` both on a second nano write (Task 3.2 Steps 1–3 without the manual file copy) → same pass criteria. Release assets need the user's go.
+- [ ] **Step 1:** On the lab FreeBSD: `pkg install git`, shallow-clone `opnsense/ports` to `/usr/ports` and `opnsense/plugins` to `/usr/plugins`; copy in `opnsense/ports/net/agnic-kmod` and `opnsense/plugins/net/agnic`. The kmod port uses `USE_GITHUB` with tag `v0.3.0`; until the tag is pushed (user's go) build from a local tarball (`git archive` → `MASTER_SITES=file:///root/dist/`). `make makesum && make package` → `agnic-kmod-0.3.0.pkg`; plugin `make package` → `os-agnic-0.3.pkg` with `rc.d/agnic_npu`, `rc.d/agnic_watch`, `agnicctl`, `rc.loader.d/50-agnic` in `pkg-plist`.
+- [ ] **Step 2:** `pkg add` both on the lab FreeBSD (use `-f` if the plugin's OPNsense metadata is refused; note it) → reboot → same pass criteria as Task 3.2 Step 4. The **OPNsense box-level test is deferred** (Appendix B8); the PR to opnsense/plugins gets it built in their CI.
+- [ ] **Step 3:** `kit/release/make-release.sh`: assembles `xgs-npu-freebsd-v0.3.0.tar.gz` (`kit/`, `build/if_agnic.ko` for 15.1, `INSTALL.md`, `SHA256SUMS`) and the release text `docs/release/v0.3.0.md`; creating the GitHub release needs the user's go.
 
-**Gate 3 pass:** 3.2 Steps 3–4 and 3.3 Step 5 green; `docs/INSTALL.md` current.
+**Gate 3 pass:** 3.2 Steps 4–5 and 3.3 Step 5 green; 3.4 packages build; `docs/INSTALL.md` current; release tarball assembled.
 
 ---
 
@@ -326,10 +350,11 @@ JSONL record: `{"ts":"2026-09-20T14:03:00Z","suite":"functional","port":1,"check
 
 ---
 
-## Phase 5: Upstream and release (texts prepared; every outward step needs the user's go)
+## Phase 5: Publish (this is the v1.0 goal: GitHub release + upstream PRs; every outward step needs one go from the user)
 
 - [ ] **5.1** `docs/upstream/PR-mamoru.md`: branch from `e4101698`, one commit per CHANGES entry (`git commit -s`), dp_fwd device-0 + counter export + instance id + `dp-boot.sh` under `npu-firmware/`; PR text with measured results and the DSA-device-number finding.
-- [ ] **5.2** `docs/upstream/PR-opnsense.md` for `net/agnic-kmod` (ports) and `net/agnic` (plugins, tier 3); `README.md` status + "Tested on"; `CHANGELOG.md`; local tag `v1.0.0`. Ask before pushing anything.
+- [ ] **5.2** `docs/upstream/PR-opnsense.md` for `net/agnic-kmod` (ports) and `net/agnic` (plugins, tier 3); `README.md` status + "Tested on" (XGS 126, FreeBSD 15.1; OPNsense: packages build, box-level untested); `CHANGELOG.md`; local tag `v1.0.0`; release tarball + `.pkg` files via `kit/release/make-release.sh`.
+- [ ] **5.3 The one go:** present to the user: push `main` + tags to `github`, create GitHub release `v1.0.0` with assets, open the two PRs (mamoru, opnsense). Execute only what the user confirms.
 
 ---
 
@@ -340,7 +365,7 @@ JSONL record: `{"ts":"2026-09-20T14:03:00Z","suite":"functional","port":1,"check
 3. One hypothesis at a time; every failed step gets a "Measured" paragraph; never stack fixes.
 4. Commit after every task; never push, tag-push, release or open PRs without the user's explicit go.
 5. A task exceeding 3× its expected duration is paused and reported.
-6. The user is needed only for: the checklist (once), the two mains cycles (Gate 1, hour 36 of the 72 h run) unless a smart plug exists, possibly one BIOS boot-menu selection in Task 3.2 Step 3, and the outward actions of Phase 5.
+6. The user is needed only for: the checklist (once), the two mains cycles (Gate 1, hour 36 of the 72 h run) unless a smart plug exists, possibly one BIOS boot-menu selection in Task 3.2 Step 3, and the single go in Phase 5 (push, release, PRs).
 
 ---
 
@@ -362,4 +387,5 @@ Four voices: Architect (in-context), Skeptic, Pragmatist, Critic (fresh subagent
 - **B4** Performance tuning: ring depth 1024, doorbell-driven RX with 50 ms poll safety net, TX doorbell batching, `dp_fwd -c 3`, NMP queue sizes.
 - **B5** eth1–eth4 SoC ports (`DP_SOC_PORTS=1`, extra ppio ports, tags 0x01–0x04 → port11–14).
 - **B6** Routed/firewall tests over two L2 segments (second switch or VLANs, `pf` NAT, 6 h split soak).
-- **B7** Plain FreeBSD 15.1 install path via `bsdinstall` (manual) and the `--console-autologin`-free production profile.
+- **B7** Production profile without console autologin; hardened `install.sh` defaults.
+- **B8** OPNsense 26.7 on the user's box (installer or nano image, `config.xml` seed, GUI assignment test, dead-NPU negative test on OPNsense) — explicitly deferred by the user on 2026-09-15: v1.0 ships the installable driver, not an OPNsense deployment.
