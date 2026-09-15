@@ -26,6 +26,7 @@
 
 - [ ] **USB-Ethernet-Adapter** (RTL8153 = `ure0` oder AX88179 = `axge0`) in den **vorderen** USB-Port der XGS, Kabel ins Heim-LAN. Der Adapter bekommt die **feste Adresse 192.168.2.250** (außerhalb des FritzBox-DHCP-Bereichs; falls dein Pool bis .250 reicht, im Plan `XGS_IP` anpassen).
 - [ ] **FTDI-Konsolenkabel** (bisher am Mac, `cu.usbserial-D30A5FY8`) **an den Pi `printscan`** umstecken. Die Konsole läuft dann als Dienst auf dem Pi und überlebt XGS-Neustarts.
+- [ ] **Nur zwei USB-Ports (vorn 2.0, hinten 3.0; die Konsole ist ein eigener Micro-USB).** Während der Installation werden drei Geräte gebraucht (Live-Stick = Quelle, Zielstick, Ethernet-Adapter). Entweder **ein kleiner USB-Hub vorn** (Live-Stick + Adapter am Hub, empfohlen, bleibt dauerhaft) oder **ohne Hub**: Installation läuft ohne Netzwerk über die Pi-Konsole (`xgscon`), danach ziehst du vorn den Live-Stick und steckst den Adapter ein (einmalig). Dauerbetrieb: vorn Adapter, hinten das installierte FreeBSD.
 - [ ] **Ein zweiter USB-Stick ≥ 16 GB (oder eine USB-SSD)** in den **hinteren** USB-3-Port der XGS. Warum ein zweiter: der vorhandene FreeBSD-Stick ist ein Live-System (Root read-only, alles nach Neustart weg) und dient als Installationsquelle und Rettungssystem; der Installations-Test braucht ein beschreibbares FreeBSD, das Reboots überlebt. Die Sitzung installiert es selbst, unbeaufsichtigt, vom Live-Stick aus.
 - [ ] **Port1–Port8** der XGS an **einen** Switch, der ans Heim-LAN hängt; **Pi `printscan`** an denselben Switch (ein Kabel).
 - [ ] Optional: eine **schaltbare Steckdose** (Smart Plug) für die XGS, damit Netzstecker-Zyklen automatisiert werden können. Ohne: du ziehst zweimal selbst (Gate 1, Stunde 36 des 72-h-Laufs); der Plan sagt dir wann.
@@ -276,6 +277,7 @@ Council decision: **no in-kernel reattach in v1.0** (Appendix B1). Two small cha
 
 The live stick *is* the 15.1 memstick, so `bsdinstall script` installs unattended from it, offline (sets in `/usr/freebsd-dist`).
 
+- [ ] **Step 0: Port budget.** Two USB ports only. With a hub on the front port: live stick + USB NIC on the hub, target stick rear; drive everything over SSH. Without a hub: live stick front, target rear, **no NIC** — drive Steps 1–2 over the Pi console (`ssh printscan "xgscon '…'"`), then after Step 3's first boot ask the user once to swap the front live stick for the USB NIC; Task 0.1's fixed IP then comes up on the installed system (`installerconfig` sets it).
 - [ ] **Step 1: Target disk.** `ssh xgs 'camcontrol devlist; geom disk list | grep -E "Name|Mediasize"'` → the rear medium is the `daN` that is **not** the live stick (`da0`, carries `EFISYS`) — refuse if ambiguous.
 - [ ] **Step 2: `kit/lab/installerconfig`** (FreeBSD unattended install file; `kit/lab/lab-install.sh` substitutes `daN` and the two SSH keys and runs `bsdinstall script /tmp/installerconfig` on the stick host):
 
